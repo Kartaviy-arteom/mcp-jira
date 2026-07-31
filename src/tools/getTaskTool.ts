@@ -1,19 +1,16 @@
 import { MCPTool, MCPInput } from "mcp-framework";
-import { findCredentials } from "@napi-rs/keyring";
 import dotenv from "dotenv";
 import { z } from "zod";
+import { getJiraUrl } from "../common/get-jira-url";
+import { getToken } from "../common/get-token";
 
 dotenv.config({
   path: new URL("../../.env", import.meta.url),
   quiet: true,
 });
 
-const [jiraCredential] = findCredentials("mcp-jira", "keyring:jira-token@mcp-jira");
-const token = z
-  .string()
-  .min(1, "Jira token is not configured")
-  .parse(jiraCredential?.password);
-const url = z.string().min(1, "JIRA_URL is required").parse(process.env.JIRA_URL);
+const token = getToken()
+const url = getJiraUrl();
 
 const inputSchema = z.object({
   issueKey: z.string().describe("Jira issue key, for example OMSAGORA-3520"),
