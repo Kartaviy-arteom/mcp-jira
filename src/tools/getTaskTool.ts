@@ -1,8 +1,8 @@
 import { MCPTool, MCPInput } from "mcp-framework";
 import dotenv from "dotenv";
 import { z } from "zod";
-import { getJiraUrl } from "../common/get-jira-url";
-import { getToken } from "../common/get-token";
+import { getJiraUrl } from "../common/get-jira-url.js";
+import { getToken } from "../common/get-token.js";
 
 dotenv.config({
   path: new URL("../../.env", import.meta.url),
