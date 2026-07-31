@@ -1,4 +1,5 @@
 import { MCPTool, MCPInput } from "mcp-framework";
+import { findCredentials } from "@napi-rs/keyring";
 import dotenv from "dotenv";
 import { z } from "zod";
 
@@ -7,7 +8,11 @@ dotenv.config({
   quiet: true,
 });
 
-const token = z.string().min(1, "TOKEN is required").parse(process.env.JIRA_TOKEN);
+const [jiraCredential] = findCredentials("mcp-jira", "keyring:jira-token@mcp-jira");
+const token = z
+  .string()
+  .min(1, "Jira token is not configured")
+  .parse(jiraCredential?.password);
 const url = z.string().min(1, "JIRA_URL is required").parse(process.env.JIRA_URL);
 
 const inputSchema = z.object({
