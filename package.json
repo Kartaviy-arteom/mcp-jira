@@ -1,0 +1,29 @@
+{
+  "name": "mcp-jira",
+  "version": "0.0.1",
+  "description": "mcp-jira MCP server",
+  "type": "module",
+  "bin": {
+    "mcp-jira": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc && mcp-build",
+    "watch": "tsc --watch",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2",
+    "mcp-framework": "^0.2.22",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.19.0"
+  }
+}
