@@ -19,3 +19,17 @@
 
 - После изменений запускай `npm run build`. Работа завершена, когда TypeScript-компиляция и `mcp-build` проходят успешно.
 - В проекте пока нет настроенных команд тестирования и линтинга. Не заявляй об их прохождении; явно укажи этот пробел, если изменение требует соответствующей проверки.
+
+## Agent skills
+
+### Issue tracker
+
+Задачи хранятся локально в Markdown-файлах. См. `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Используются стандартные triage-метки. См. `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Используется структура `single-context`. См. `docs/agents/domain.md`.
