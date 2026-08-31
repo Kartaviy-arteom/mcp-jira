@@ -1,10 +1,6 @@
 import { MCPTool, MCPInput } from "mcp-framework";
 import { z } from "zod";
-import {
-  JIRA_ERROR_CODE,
-  JiraClientError,
-  jiraClient,
-} from "../jira/client.js";
+import { JIRA_ERROR_CODE, JiraClientError, jiraClient } from "../jira/client.js";
 
 const inputSchema = z.object({
   issueKey: z.string().describe("Jira issue key, for example OMSAGORA-3520"),
@@ -12,10 +8,22 @@ const inputSchema = z.object({
 
 const outputSchema = z.object({
   id: z.string().describe("The unique internal numeric ID of the Jira task (e.g., '10024')."),
-  key: z.string().describe("The visible project-specific task key (e.g., 'OMSAGORA-3520'). Use this to reference the task."),
+  key: z
+    .string()
+    .describe(
+      "The visible project-specific task key (e.g., 'OMSAGORA-3520'). Use this to reference the task.",
+    ),
   summary: z.string().describe("The short title or summary describing the core goal of the task."),
-  description: z.string().describe("Detailed technical and business description of the task, requirements, and steps to reproduce if applicable."),
-  status: z.string().describe("The current workflow stage of the task as a text string (e.g., 'To Do', 'In Progress', 'Done', 'Code Review').")
+  description: z
+    .string()
+    .describe(
+      "Detailed technical and business description of the task, requirements, and steps to reproduce if applicable.",
+    ),
+  status: z
+    .string()
+    .describe(
+      "The current workflow stage of the task as a text string (e.g., 'To Do', 'In Progress', 'Done', 'Code Review').",
+    ),
 });
 
 const jiraIssueSchema = z.object({
@@ -56,11 +64,7 @@ class GetTaskTool extends MCPTool {
       return outputSchema.parse(result);
     } catch (cause) {
       if (cause instanceof JiraClientError) throw cause;
-      throw new JiraClientError(
-        JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
-        undefined,
-        cause,
-      );
+      throw new JiraClientError(JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR, undefined, cause);
     }
   }
 }

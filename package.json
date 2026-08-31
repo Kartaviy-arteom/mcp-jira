@@ -2,24 +2,31 @@
   "name": "mcp-jira",
   "version": "0.0.1",
   "description": "mcp-jira MCP server",
-  "type": "module",
   "bin": {
     "mcp-jira": "./dist/index.js"
   },
   "files": [
     "dist"
   ],
+  "type": "module",
   "scripts": {
     "build": "tsc && mcp-build",
     "test": "vitest run",
     "test:watch": "vitest",
+    "types": "tsc --noEmit",
     "watch": "tsc --watch",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check"
   },
   "dependencies": {
     "@napi-rs/keyring": "^1.3.0",
     "dotenv": "^17.4.2",
     "mcp-framework": "^0.2.22",
+    "oxfmt": "^0.60.0",
+    "oxlint": "^1.75.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {

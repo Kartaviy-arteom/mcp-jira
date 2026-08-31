@@ -130,18 +130,18 @@ GET /rest/api/2/myself
 
 Соответствие ошибок:
 
-| Условие | `code` | `httpStatus` |
-|---|---|---:|
-| Jira вернула `400` | `BAD_REQUEST` | `400` |
-| Jira вернула `401` | `AUTH_ERROR` | `401` |
-| Jira вернула `403` | `ACCESS_DENIED` | `403` |
-| Jira вернула `408` | `NETWORK_TIMEOUT` | `408` |
-| Jira вернула `429` | `RATE_LIMITED` | `429` |
-| Jira вернула `5xx` | `JIRA_UNAVAILABLE` | фактический статус |
-| DNS, TLS, connection refused/reset | `JIRA_UNAVAILABLE` | отсутствует |
-| Локальный тайм-аут 10 секунд | `NETWORK_TIMEOUT` | отсутствует |
+| Условие                                   | `code`                  |                   `httpStatus` |
+| ----------------------------------------- | ----------------------- | -----------------------------: |
+| Jira вернула `400`                        | `BAD_REQUEST`           |                          `400` |
+| Jira вернула `401`                        | `AUTH_ERROR`            |                          `401` |
+| Jira вернула `403`                        | `ACCESS_DENIED`         |                          `403` |
+| Jira вернула `408`                        | `NETWORK_TIMEOUT`       |                          `408` |
+| Jira вернула `429`                        | `RATE_LIMITED`          |                          `429` |
+| Jira вернула `5xx`                        | `JIRA_UNAVAILABLE`      |             фактический статус |
+| DNS, TLS, connection refused/reset        | `JIRA_UNAVAILABLE`      |                    отсутствует |
+| Локальный тайм-аут 10 секунд              | `NETWORK_TIMEOUT`       |                    отсутствует |
 | Некорректный JSON или несовместимая схема | `RESPONSE_FORMAT_ERROR` | фактический статус при наличии |
-| Нет или некорректен `JIRA_URL` или токен | `CONFIG_ERROR` | отсутствует |
+| Нет или некорректен `JIRA_URL` или токен  | `CONFIG_ERROR`          |                    отсутствует |
 
 `404` обрабатывается с учетом операции:
 
@@ -524,9 +524,11 @@ protected outputSchemaShape = outputSchema;
 Все входные Zod-объекты объявлять через `.strict()`:
 
 ```ts
-const inputSchema = z.object({
-  issueKey: issueKeySchema,
-}).strict();
+const inputSchema = z
+  .object({
+    issueKey: issueKeySchema,
+  })
+  .strict();
 ```
 
 Неизвестные входные поля должны отклоняться, а не молча удаляться. Это позволяет обнаруживать опечатки в необязательных параметрах, например `includeDescriptions` вместо `includeDescription`.

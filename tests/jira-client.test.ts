@@ -1,15 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import {
-  JIRA_ERROR_CODE,
-  createJiraClient,
-} from "../src/jira/client.js";
+import { JIRA_ERROR_CODE, createJiraClient } from "../src/jira/client.js";
 
 describe("Jira HTTP client", () => {
   it("gets and validates JSON through a safe Jira URL", async () => {
-    const fetch = vi.fn(async () =>
-      Response.json({ id: "10001" }),
-    );
+    const fetch = vi.fn(async () => Response.json({ id: "10001" }));
     const client = createJiraClient({
       fetch,
       getJiraUrl: () => "https://jira.example.test/jira/",
@@ -25,9 +20,7 @@ describe("Jira HTTP client", () => {
 
     expect(result).toEqual({ id: "10001" });
     expect(fetch).toHaveBeenCalledWith(
-      new URL(
-        "https://jira.example.test/jira/rest/api/2/issue/OMS-1?fields=summary%2Cstatus",
-      ),
+      new URL("https://jira.example.test/jira/rest/api/2/issue/OMS-1?fields=summary%2Cstatus"),
       {
         headers: {
           Accept: "application/json",
@@ -99,9 +92,7 @@ describe("Jira HTTP client", () => {
       timeoutMs: 1_000,
     });
 
-    await expect(
-      client.getJson({ pathname: "rest/api/2/search", schema }),
-    ).rejects.toMatchObject({
+    await expect(client.getJson({ pathname: "rest/api/2/search", schema })).rejects.toMatchObject({
       code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
       httpStatus: 200,
       message: JSON.stringify({
@@ -208,9 +199,7 @@ describe("Jira HTTP client", () => {
       timeoutMs: 1_000,
     });
 
-    await expect(
-      client.getJson({ pathname, schema: z.unknown() }),
-    ).rejects.toMatchObject({
+    await expect(client.getJson({ pathname, schema: z.unknown() })).rejects.toMatchObject({
       code: JIRA_ERROR_CODE.BAD_REQUEST,
       message: JSON.stringify({
         code: JIRA_ERROR_CODE.BAD_REQUEST,
@@ -221,10 +210,11 @@ describe("Jira HTTP client", () => {
   });
 
   it("returns a binary response without parsing its body as JSON", async () => {
-    const fetch = vi.fn(async () =>
-      new Response(Uint8Array.from([0x89, 0x50, 0x4e, 0x47]), {
-        headers: { "Content-Type": "image/png" },
-      }),
+    const fetch = vi.fn(
+      async () =>
+        new Response(Uint8Array.from([0x89, 0x50, 0x4e, 0x47]), {
+          headers: { "Content-Type": "image/png" },
+        }),
     );
     const client = createJiraClient({
       fetch,
@@ -264,10 +254,7 @@ describe("Jira HTTP client", () => {
             start(controller) {
               init.signal?.addEventListener(
                 "abort",
-                () =>
-                  controller.error(
-                    new DOMException("private timeout", "TimeoutError"),
-                  ),
+                () => controller.error(new DOMException("private timeout", "TimeoutError")),
                 { once: true },
               );
             },

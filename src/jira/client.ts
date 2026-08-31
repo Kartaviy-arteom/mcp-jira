@@ -15,13 +15,9 @@ export const JIRA_ERROR_CODE = {
   ATTACHMENT_NOT_FOUND: "ATTACHMENT_NOT_FOUND",
 } as const;
 
-export type JiraErrorCode =
-  (typeof JIRA_ERROR_CODE)[keyof typeof JIRA_ERROR_CODE];
+export type JiraErrorCode = (typeof JIRA_ERROR_CODE)[keyof typeof JIRA_ERROR_CODE];
 
-type JiraNotFoundCode = (typeof JIRA_ERROR_CODE)[
-  | "ISSUE_NOT_FOUND"
-  | "ATTACHMENT_NOT_FOUND"
-];
+type JiraNotFoundCode = (typeof JIRA_ERROR_CODE)["ISSUE_NOT_FOUND" | "ATTACHMENT_NOT_FOUND"];
 
 const safeMessages: Record<JiraErrorCode, string> = {
   BAD_REQUEST: "Jira rejected the request.",
@@ -47,10 +43,7 @@ export class JiraClientError extends Error {
       message: safeMessages[code],
       ...(httpStatus === undefined ? {} : { httpStatus }),
     };
-    super(
-      JSON.stringify(payload),
-      cause === undefined ? undefined : { cause },
-    );
+    super(JSON.stringify(payload), cause === undefined ? undefined : { cause });
     this.name = "JiraClientError";
   }
 }
@@ -86,10 +79,7 @@ const getHttpErrorCode = (
   return JIRA_ERROR_CODE.JIRA_UNAVAILABLE;
 };
 
-const wrapBinaryResponse = (
-  response: Response,
-  signal: AbortSignal,
-): Response => {
+const wrapBinaryResponse = (response: Response, signal: AbortSignal): Response => {
   if (response.body === null) return response;
 
   const reader = response.body.getReader();
@@ -105,9 +95,7 @@ const wrapBinaryResponse = (
       } catch (cause) {
         controller.error(
           new JiraClientError(
-            signal.aborted
-              ? JIRA_ERROR_CODE.NETWORK_TIMEOUT
-              : JIRA_ERROR_CODE.JIRA_UNAVAILABLE,
+            signal.aborted ? JIRA_ERROR_CODE.NETWORK_TIMEOUT : JIRA_ERROR_CODE.JIRA_UNAVAILABLE,
             undefined,
             cause,
           ),
@@ -126,9 +114,7 @@ const wrapBinaryResponse = (
   });
 };
 
-export const createJiraClient = (
-  overrides: Partial<JiraClientDependencies> = {},
-) => {
+export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}) => {
   const dependencies: JiraClientDependencies = {
     fetch: (input, init) => globalThis.fetch(input, init),
     getJiraUrl,
@@ -136,10 +122,7 @@ export const createJiraClient = (
     timeoutMs: 10_000,
     ...overrides,
   };
-  const buildUrl = (
-    pathname: string,
-    query: GetOptions["query"],
-  ): URL => {
+  const buildUrl = (pathname: string, query: GetOptions["query"]): URL => {
     let baseUrl: URL;
 
     try {
@@ -176,10 +159,7 @@ export const createJiraClient = (
       /^[a-z][a-z\d+.-]*:/i.test(pathname) ||
       pathSegments.some(
         (segment) =>
-          segment === "." ||
-          segment === ".." ||
-          segment.includes("/") ||
-          segment.includes("\\"),
+          segment === "." || segment === ".." || segment.includes("/") || segment.includes("\\"),
       )
     ) {
       throw new JiraClientError(JIRA_ERROR_CODE.BAD_REQUEST);
@@ -228,31 +208,21 @@ export const createJiraClient = (
       });
     } catch (cause) {
       throw new JiraClientError(
-        signal.aborted
-          ? JIRA_ERROR_CODE.NETWORK_TIMEOUT
-          : JIRA_ERROR_CODE.JIRA_UNAVAILABLE,
+        signal.aborted ? JIRA_ERROR_CODE.NETWORK_TIMEOUT : JIRA_ERROR_CODE.JIRA_UNAVAILABLE,
         undefined,
         cause,
       );
     }
 
     if (!response.ok) {
-      throw new JiraClientError(
-        getHttpErrorCode(response.status, notFoundCode),
-        response.status,
-      );
+      throw new JiraClientError(getHttpErrorCode(response.status, notFoundCode), response.status);
     }
 
     return { response, signal };
   };
 
   return {
-    async getJson<T>({
-      pathname,
-      query,
-      schema,
-      notFoundCode,
-    }: GetJsonOptions<T>): Promise<T> {
+    async getJson<T>({ pathname, query, schema, notFoundCode }: GetJsonOptions<T>): Promise<T> {
       const { response, signal } = await request(
         { pathname, query, notFoundCode },
         "application/json",
@@ -277,23 +247,12 @@ export const createJiraClient = (
       try {
         return schema.parse(body);
       } catch (cause) {
-        throw new JiraClientError(
-          JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
-          response.status,
-          cause,
-        );
+        throw new JiraClientError(JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR, response.status, cause);
       }
     },
 
-    async getBinary({
-      pathname,
-      query,
-      notFoundCode,
-    }: GetOptions): Promise<Response> {
-      const { response, signal } = await request(
-        { pathname, query, notFoundCode },
-        "*/*",
-      );
+    async getBinary({ pathname, query, notFoundCode }: GetOptions): Promise<Response> {
+      const { response, signal } = await request({ pathname, query, notFoundCode }, "*/*");
 
       return wrapBinaryResponse(response, signal);
     },

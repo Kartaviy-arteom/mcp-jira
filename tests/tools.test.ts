@@ -74,15 +74,16 @@ describe("Jira tools", () => {
     });
 
     expect(response.isError).toBeUndefined();
-    expect(JSON.parse(response.content[0]?.type === "text" ? response.content[0].text : "null"))
-      .toEqual([
-        {
-          id: "10002",
-          key: "OMS-2",
-          summary: "Migrate tool",
-          description: "Done safely",
-        },
-      ]);
+    expect(
+      JSON.parse(response.content[0]?.type === "text" ? response.content[0].text : "null"),
+    ).toEqual([
+      {
+        id: "10002",
+        key: "OMS-2",
+        summary: "Migrate tool",
+        description: "Done safely",
+      },
+    ]);
     expect(fetch).toHaveBeenCalledWith(
       new URL(
         "https://jira.example.test/jira/rest/api/2/search?jql=fixVersion%3D18136&startAt=0&maxResults=500&fields=summary%2Cstatus%2Cdescription",
@@ -109,9 +110,7 @@ describe("Jira tools", () => {
   it("returns only the safe Jira error through MCP", async () => {
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () =>
-        new Response("private Jira stack and implementation", { status: 500 }),
-      ),
+      vi.fn(async () => new Response("private Jira stack and implementation", { status: 500 })),
     );
 
     const response = await new GetTaskTool().toolCall({

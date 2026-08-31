@@ -80,6 +80,7 @@ export default MyTool;
    - Check `bin` points to the correct entry file
 
 2. Build and test locally:
+
    ```bash
    npm run build
    npm link
@@ -87,6 +88,7 @@ export default MyTool;
    ```
 
 3. Login to npm (create account if necessary):
+
    ```bash
    npm login
    ```
@@ -97,7 +99,8 @@ export default MyTool;
    ```
 
 After publishing, users can add it to their claude desktop client (read below) or run it with npx
-```
+
+````
 
 ## Using with Claude Desktop
 
@@ -117,7 +120,7 @@ Add this configuration to your Claude Desktop config file:
     }
   }
 }
-```
+````
 
 ### After Publishing
 
