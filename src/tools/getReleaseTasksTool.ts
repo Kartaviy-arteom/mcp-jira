@@ -1,19 +1,13 @@
 import { MCPInput, MCPTool } from "mcp-framework";
-import dotenv from "dotenv";
 import { z } from "zod";
-import { getJiraUrl } from "../common/get-jira-url.js";
-import { getToken } from "../common/get-token.js";
-
-dotenv.config({
-  path: new URL("../../.env", import.meta.url),
-  quiet: true,
-});
-
-const token = getToken();
-const url = getJiraUrl();
+import {
+  JIRA_ERROR_CODE,
+  JiraClientError,
+  jiraClient,
+} from "../jira/client.js";
 
 const inputSchema = z.object({
-  issueKey: z.string().min(1).describe("The Jira release ID used to find tasks assigned to the release."),
+  releaseId: z.string().regex(/^\d+$/).describe("The numeric Jira release ID used to find assigned tasks."),
 });
 
 const taskSchema = z.object({
@@ -43,21 +37,16 @@ class GetReleaseTasksTool extends MCPTool {
 
   async execute(input: MCPInput<this>) {
     try {
-      const response = await fetch(
-        `${url}/rest/api/2/search?jql=fixVersion=${input.issueKey}&startAt=0&maxResults=500&fields=summary,status,description`,
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            Accept: "application/json",
-          },
+      const { issues } = await jiraClient.getJson({
+        pathname: "rest/api/2/search",
+        query: {
+          jql: `fixVersion=${input.releaseId}`,
+          startAt: 0,
+          maxResults: 500,
+          fields: "summary,status,description",
         },
-      );
-
-      if (!response.ok) {
-        throw new Error("Failed to execute Jira release tasks tool.");
-      }
-
-      const { issues } = jiraSearchResponseSchema.parse(await response.json());
+        schema: jiraSearchResponseSchema,
+      });
 
       return outputSchema.parse(issues.map((task) => ({
         id: task.id,
@@ -65,8 +54,13 @@ class GetReleaseTasksTool extends MCPTool {
         summary: task.fields?.summary,
         description: task.fields?.description ?? "",
       })));
-    } catch {
-      throw new Error("Failed to execute Jira release tasks tool.");
+    } catch (cause) {
+      if (cause instanceof JiraClientError) throw cause;
+      throw new JiraClientError(
+        JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
+        undefined,
+        cause,
+      );
     }
   }
 }

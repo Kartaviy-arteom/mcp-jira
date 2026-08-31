@@ -1,16 +1,10 @@
 import { MCPTool, MCPInput } from "mcp-framework";
-import dotenv from "dotenv";
 import { z } from "zod";
-import { getJiraUrl } from "../common/get-jira-url.js";
-import { getToken } from "../common/get-token.js";
-
-dotenv.config({
-  path: new URL("../../.env", import.meta.url),
-  quiet: true,
-});
-
-const token = getToken()
-const url = getJiraUrl();
+import {
+  JIRA_ERROR_CODE,
+  JiraClientError,
+  jiraClient,
+} from "../jira/client.js";
 
 const inputSchema = z.object({
   issueKey: z.string().describe("Jira issue key, for example OMSAGORA-3520"),
@@ -43,20 +37,13 @@ class GetTaskTool extends MCPTool {
   protected outputSchemaShape = outputSchema;
 
   async execute(input: MCPInput<this>) {
-
     try {
-      const response = await fetch(`${url}/rest/api/2/issue/${input.issueKey}?fields=summary,status,description`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/json",
-        },
+      const task = await jiraClient.getJson({
+        pathname: `rest/api/2/issue/${encodeURIComponent(input.issueKey)}`,
+        query: { fields: "summary,status,description" },
+        schema: jiraIssueSchema,
+        notFoundCode: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
       });
-
-      if (!response.ok) {
-        throw new Error('Failed to execute Jira issue tool.');
-      }
-
-      const task = jiraIssueSchema.parse(await response.json());
 
       const result = {
         id: task.id,
@@ -67,8 +54,13 @@ class GetTaskTool extends MCPTool {
       };
 
       return outputSchema.parse(result);
-    } catch {
-      throw new Error('Failed to execute Jira issue tool.');
+    } catch (cause) {
+      if (cause instanceof JiraClientError) throw cause;
+      throw new JiraClientError(
+        JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
+        undefined,
+        cause,
+      );
     }
   }
 }
