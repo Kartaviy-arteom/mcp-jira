@@ -22,6 +22,25 @@ export type JiraErrorCode = (typeof JIRA_ERROR_CODE)[keyof typeof JIRA_ERROR_COD
 
 type JiraNotFoundCode = (typeof JIRA_ERROR_CODE)["ISSUE_NOT_FOUND" | "ATTACHMENT_NOT_FOUND"];
 
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | { readonly [key: string]: JsonValue }
+  | readonly JsonValue[];
+
+declare const normalizedJiraErrorDetails: unique symbol;
+
+export type NormalizedJiraErrorDetails = JsonValue & {
+  readonly [normalizedJiraErrorDetails]: true;
+};
+
+export const normalizeJiraErrorDetails = <T extends JsonValue>(
+  schema: z.ZodType<T>,
+  details: unknown,
+): NormalizedJiraErrorDetails => schema.parse(details) as unknown as NormalizedJiraErrorDetails;
+
 const safeMessages: Record<JiraErrorCode, string> = {
   BAD_REQUEST: "Jira rejected the request.",
   AUTH_ERROR: "Jira authentication failed.",
@@ -42,11 +61,12 @@ export class JiraClientError extends Error {
     readonly code: JiraErrorCode,
     readonly httpStatus?: number,
     cause?: unknown,
+    details?: NormalizedJiraErrorDetails,
   ) {
     const payload = {
       code,
       message: safeMessages[code],
-      ...(httpStatus === undefined ? {} : { httpStatus }),
+      ...(details === undefined ? {} : { details }),
     };
     super(JSON.stringify(payload), cause === undefined ? undefined : { cause });
     this.name = "JiraClientError";
@@ -60,21 +80,29 @@ type JiraClientDependencies = {
   timeoutMs: number;
 };
 
-type GetOptions = {
+type RequestOptions = {
   pathname: string;
   query?: Readonly<Record<string, string | number | boolean | undefined>>;
   notFoundCode?: JiraNotFoundCode;
 };
 
-type GetJsonOptions<T> = GetOptions & {
+type GetJsonOptions<T> = RequestOptions & {
   schema: z.ZodType<T>;
 };
 
-type ProbeOptions = Pick<GetOptions, "pathname" | "query">;
+type PostJsonNoContentOptions = RequestOptions & {
+  body: JsonValue;
+};
+
+type ProbeOptions = Pick<RequestOptions, "pathname" | "query">;
+
+type RequestTransportOptions = Pick<RequestInit, "body" | "method"> & {
+  contentType?: string;
+};
 
 const getHttpErrorCode = (
   status: number,
-  notFoundCode?: GetOptions["notFoundCode"],
+  notFoundCode?: RequestOptions["notFoundCode"],
 ): JiraErrorCode => {
   if (status === 400) return JIRA_ERROR_CODE.BAD_REQUEST;
   if (status === 401) return JIRA_ERROR_CODE.AUTH_ERROR;
@@ -143,7 +171,7 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
     return baseUrl;
   };
 
-  const buildUrl = (pathname: string, query: GetOptions["query"]): URL => {
+  const buildUrl = (pathname: string, query: RequestOptions["query"]): URL => {
     const baseUrl = getBaseUrl();
 
     let pathSegments: string[];
@@ -188,16 +216,20 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
     accept: string,
     token: string | undefined,
     redirect: RequestRedirect,
+    requestInit: RequestTransportOptions = {},
   ): Promise<{ response: Response; signal: AbortSignal }> => {
     const signal = AbortSignal.timeout(dependencies.timeoutMs);
     const url = buildUrl(pathname, query);
     const headers: Record<string, string> = { Accept: accept };
     if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+    if (requestInit.contentType !== undefined) headers["Content-Type"] = requestInit.contentType;
 
     let response: Response;
 
     try {
       response = await dependencies.fetch(url, {
+        ...(requestInit.method === undefined ? {} : { method: requestInit.method }),
+        ...(requestInit.body === undefined ? {} : { body: requestInit.body }),
         headers,
         redirect,
         signal,
@@ -214,8 +246,9 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
   };
 
   const request = async (
-    { pathname, query, notFoundCode }: GetOptions,
+    { pathname, query, notFoundCode }: RequestOptions,
     accept: string,
+    requestInit?: RequestTransportOptions,
   ): Promise<{ response: Response; signal: AbortSignal }> => {
     let token: string;
 
@@ -226,7 +259,7 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
       throw new JiraClientError(JIRA_ERROR_CODE.CONFIG_ERROR, undefined, cause);
     }
 
-    const result = await send({ pathname, query }, accept, token, "error");
+    const result = await send({ pathname, query }, accept, token, "error", requestInit);
 
     if (!result.response.ok) {
       throw new JiraClientError(
@@ -314,7 +347,35 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
       }
     },
 
-    async getBinary({ pathname, query, notFoundCode }: GetOptions): Promise<Response> {
+    async postJsonNoContent({
+      pathname,
+      query,
+      body,
+      notFoundCode,
+    }: PostJsonNoContentOptions): Promise<void> {
+      let serializedBody: string | undefined;
+      try {
+        serializedBody = JSON.stringify(body);
+      } catch (cause) {
+        throw new JiraClientError(JIRA_ERROR_CODE.BAD_REQUEST, undefined, cause);
+      }
+
+      if (serializedBody === undefined) {
+        throw new JiraClientError(JIRA_ERROR_CODE.BAD_REQUEST);
+      }
+
+      const { response } = await request({ pathname, query, notFoundCode }, "application/json", {
+        method: "POST",
+        body: serializedBody,
+        contentType: "application/json",
+      });
+
+      if (response.status !== 204) {
+        throw new JiraClientError(JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR, response.status);
+      }
+    },
+
+    async getBinary({ pathname, query, notFoundCode }: RequestOptions): Promise<Response> {
       const { response, signal } = await request({ pathname, query, notFoundCode }, "*/*");
 
       return wrapBinaryResponse(response, signal);

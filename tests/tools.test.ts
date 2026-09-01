@@ -125,7 +125,6 @@ describe("Jira tools", () => {
           text: JSON.stringify({
             code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
             message: "Jira returned an unexpected response.",
-            httpStatus: 200,
           }),
         },
       ],
@@ -166,7 +165,6 @@ describe("Jira tools", () => {
           text: JSON.stringify({
             code: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
             message: "Jira issue was not found.",
-            httpStatus: 404,
           }),
         },
       ],
@@ -490,7 +488,6 @@ describe("Jira tools", () => {
           text: JSON.stringify({
             code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
             message: "Jira returned an unexpected response.",
-            httpStatus: 200,
           }),
         },
       ],
@@ -659,7 +656,6 @@ describe("Jira tools", () => {
           text: JSON.stringify({
             code: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
             message: "Jira issue was not found.",
-            httpStatus: 404,
           }),
         },
       ],
@@ -1022,7 +1018,6 @@ describe("Jira tools", () => {
           text: JSON.stringify({
             code: JIRA_ERROR_CODE.ATTACHMENT_NOT_FOUND,
             message: "Jira attachment was not found.",
-            httpStatus: 404,
           }),
         },
       ],
@@ -1296,7 +1291,6 @@ describe("Jira tools", () => {
           text: JSON.stringify({
             code: JIRA_ERROR_CODE.JIRA_UNAVAILABLE,
             message: "Jira is unavailable.",
-            httpStatus: 500,
           }),
         },
       ],

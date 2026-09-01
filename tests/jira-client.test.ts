@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { JIRA_ERROR_CODE, createJiraClient } from "../src/jira/client.js";
+import {
+  JIRA_ERROR_CODE,
+  JiraClientError,
+  createJiraClient,
+  normalizeJiraErrorDetails,
+} from "../src/jira/client.js";
 
 describe("Jira HTTP client", () => {
   it("probes Jira without credentials and accepts any HTTP status", async () => {
@@ -84,6 +89,170 @@ describe("Jira HTTP client", () => {
     );
   });
 
+  it("posts JSON once and accepts a 204 response", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }));
+    const stringify = vi.spyOn(JSON, "stringify");
+    const client = createJiraClient({
+      fetch,
+      getJiraUrl: () => "https://jira.example.test/jira/",
+      getToken: () => "secret-token",
+      timeoutMs: 1_000,
+    });
+
+    await expect(
+      client.postJsonNoContent({
+        pathname: "rest/api/2/issue/OMS-1/transitions",
+        query: { notifyUsers: false },
+        body: { transition: { id: "31" } },
+        notFoundCode: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(stringify).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledWith(
+      new URL(
+        "https://jira.example.test/jira/rest/api/2/issue/OMS-1/transitions?notifyUsers=false",
+      ),
+      {
+        method: "POST",
+        body: '{"transition":{"id":"31"}}',
+        headers: {
+          Accept: "application/json",
+          Authorization: "Bearer secret-token",
+          "Content-Type": "application/json",
+        },
+        redirect: "error",
+        signal: expect.any(AbortSignal),
+      },
+    );
+  });
+
+  it.each([200, 201, 202])("rejects incompatible successful POST status %i", async (status) => {
+    const client = createJiraClient({
+      fetch: async () => Response.json({ private: "Jira body" }, { status }),
+      getJiraUrl: () => "https://jira.example.test",
+      getToken: () => "secret-token",
+      timeoutMs: 1_000,
+    });
+
+    await expect(
+      client.postJsonNoContent({ pathname: "rest/api/2/issue/OMS-1/transitions", body: {} }),
+    ).rejects.toMatchObject({
+      code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
+      httpStatus: status,
+      message: JSON.stringify({
+        code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
+        message: "Jira returned an unexpected response.",
+      }),
+    });
+  });
+
+  it("maps a POST 404 with the caller's context", async () => {
+    const client = createJiraClient({
+      fetch: async () => new Response("private Jira body", { status: 404 }),
+      getJiraUrl: () => "https://jira.example.test",
+      getToken: () => "secret-token",
+      timeoutMs: 1_000,
+    });
+
+    await expect(
+      client.postJsonNoContent({
+        pathname: "rest/api/2/issue/OMS-404/transitions",
+        body: { transition: { id: "31" } },
+        notFoundCode: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
+      }),
+    ).rejects.toMatchObject({
+      code: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
+      httpStatus: 404,
+      message: JSON.stringify({
+        code: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
+        message: "Jira issue was not found.",
+      }),
+    });
+  });
+
+  it("times out a POST without exposing transport details", async () => {
+    const fetch = vi.fn(
+      async (_input: URL, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("private POST timeout", "TimeoutError")),
+            { once: true },
+          );
+        }),
+    );
+    const client = createJiraClient({
+      fetch,
+      getJiraUrl: () => "https://jira.example.test",
+      getToken: () => "secret-token",
+      timeoutMs: 1,
+    });
+
+    await expect(
+      client.postJsonNoContent({
+        pathname: "rest/api/2/issue/OMS-1/transitions",
+        body: { transition: { id: "31" } },
+      }),
+    ).rejects.toMatchObject({
+      code: JIRA_ERROR_CODE.NETWORK_TIMEOUT,
+      message: JSON.stringify({
+        code: JIRA_ERROR_CODE.NETWORK_TIMEOUT,
+        message: "Jira request timed out.",
+      }),
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it("maps POST serialization failures without sending or exposing the body", async () => {
+    const fetch = vi.fn();
+    const privateBody: Record<string, unknown> = { secret: "private body" };
+    privateBody.circular = privateBody;
+    const client = createJiraClient({
+      fetch,
+      getJiraUrl: () => "https://jira.example.test",
+      getToken: () => "secret-token",
+      timeoutMs: 1_000,
+    });
+
+    const promise = client.postJsonNoContent({
+      pathname: "rest/api/2/issue/OMS-1/transitions",
+      body: privateBody,
+    });
+
+    await expect(promise).rejects.toMatchObject({
+      code: JIRA_ERROR_CODE.BAD_REQUEST,
+      message: JSON.stringify({
+        code: JIRA_ERROR_CODE.BAD_REQUEST,
+        message: "Jira rejected the request.",
+      }),
+    });
+    await expect(promise).rejects.not.toThrow("private body");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps diagnostics private while publishing normalized details", () => {
+    const cause = new Error("private cause");
+    const details = normalizeJiraErrorDetails(z.object({ field: z.string() }), {
+      field: "targetStatus",
+      private: "Jira response",
+    });
+    const error = new JiraClientError(JIRA_ERROR_CODE.BAD_REQUEST, 400, cause, details);
+
+    expect(error).toMatchObject({
+      code: JIRA_ERROR_CODE.BAD_REQUEST,
+      httpStatus: 400,
+      cause,
+      message: JSON.stringify({
+        code: JIRA_ERROR_CODE.BAD_REQUEST,
+        message: "Jira rejected the request.",
+        details: { field: "targetStatus" },
+      }),
+    });
+    expect(error.message).not.toContain("private cause");
+    expect(error.message).not.toContain("Jira response");
+  });
+
   it.each([
     [400, JIRA_ERROR_CODE.BAD_REQUEST, "Jira rejected the request."],
     [401, JIRA_ERROR_CODE.AUTH_ERROR, "Jira authentication failed."],
@@ -104,7 +273,7 @@ describe("Jira HTTP client", () => {
     ).rejects.toMatchObject({
       code,
       httpStatus: status,
-      message: JSON.stringify({ code, message, httpStatus: status }),
+      message: JSON.stringify({ code, message }),
     });
   });
 
@@ -128,7 +297,6 @@ describe("Jira HTTP client", () => {
       message: JSON.stringify({
         code: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
         message: "Jira issue was not found.",
-        httpStatus: 404,
       }),
     });
   });
@@ -150,7 +318,6 @@ describe("Jira HTTP client", () => {
       message: JSON.stringify({
         code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
         message: "Jira returned an unexpected response.",
-        httpStatus: 200,
       }),
     });
   });
