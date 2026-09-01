@@ -65,6 +65,8 @@ type GetJsonOptions<T> = GetOptions & {
   schema: z.ZodType<T>;
 };
 
+type ProbeOptions = Pick<GetOptions, "pathname" | "query">;
+
 const getHttpErrorCode = (
   status: number,
   notFoundCode?: GetOptions["notFoundCode"],
@@ -180,30 +182,23 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
     return url;
   };
 
-  const request = async (
-    { pathname, query, notFoundCode }: GetOptions,
+  const send = async (
+    { pathname, query }: ProbeOptions,
     accept: string,
+    token: string | undefined,
+    redirect: RequestRedirect,
   ): Promise<{ response: Response; signal: AbortSignal }> => {
     const signal = AbortSignal.timeout(dependencies.timeoutMs);
-    let token: string;
-
-    try {
-      token = dependencies.getToken();
-      if (token.trim() === "") throw new Error("Missing token");
-    } catch (cause) {
-      throw new JiraClientError(JIRA_ERROR_CODE.CONFIG_ERROR, undefined, cause);
-    }
-
     const url = buildUrl(pathname, query);
+    const headers: Record<string, string> = { Accept: accept };
+    if (token !== undefined) headers.Authorization = `Bearer ${token}`;
+
     let response: Response;
 
     try {
       response = await dependencies.fetch(url, {
-        headers: {
-          Accept: accept,
-          Authorization: `Bearer ${token}`,
-        },
-        redirect: "error",
+        headers,
+        redirect,
         signal,
       });
     } catch (cause) {
@@ -214,14 +209,60 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
       );
     }
 
-    if (!response.ok) {
-      throw new JiraClientError(getHttpErrorCode(response.status, notFoundCode), response.status);
-    }
-
     return { response, signal };
   };
 
+  const request = async (
+    { pathname, query, notFoundCode }: GetOptions,
+    accept: string,
+  ): Promise<{ response: Response; signal: AbortSignal }> => {
+    let token: string;
+
+    try {
+      token = dependencies.getToken();
+      if (token.trim() === "") throw new Error("Missing token");
+    } catch (cause) {
+      throw new JiraClientError(JIRA_ERROR_CODE.CONFIG_ERROR, undefined, cause);
+    }
+
+    const result = await send({ pathname, query }, accept, token, "error");
+
+    if (!result.response.ok) {
+      throw new JiraClientError(
+        getHttpErrorCode(result.response.status, notFoundCode),
+        result.response.status,
+      );
+    }
+
+    return result;
+  };
+
   return {
+    async probe({ pathname, query }: ProbeOptions) {
+      let token: string | undefined;
+
+      try {
+        const configuredToken = dependencies.getToken();
+        if (configuredToken.trim()) token = configuredToken;
+      } catch {
+        // Отсутствующие credentials не должны мешать проверке доступности Jira.
+      }
+
+      const credentialsFound = token !== undefined;
+
+      try {
+        const { response } = await send({ pathname, query }, "application/json", token, "manual");
+        return { configured: true, credentialsFound, status: response.status };
+      } catch (cause) {
+        return {
+          configured: !(
+            cause instanceof JiraClientError && cause.code === JIRA_ERROR_CODE.CONFIG_ERROR
+          ),
+          credentialsFound,
+        };
+      }
+    },
+
     async getJson<T>({ pathname, query, schema, notFoundCode }: GetJsonOptions<T>): Promise<T> {
       const { response, signal } = await request(
         { pathname, query, notFoundCode },

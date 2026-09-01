@@ -1,21 +1,136 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@napi-rs/keyring", () => ({
-  findCredentials: () => [{ password: "test-token" }],
+const { findCredentials } = vi.hoisted(() => ({
+  findCredentials: vi.fn((): { password: string }[] => [{ password: "test-token" }]),
 }));
 
+vi.mock("@napi-rs/keyring", () => ({
+  findCredentials,
+}));
+
+import DiagnoseJiraConnectionTool from "../src/tools/diagnoseJiraConnectionTool.js";
 import GetReleaseTasksTool from "../src/tools/getReleaseTasksTool.js";
 import GetTaskTool from "../src/tools/getTaskTool.js";
 import { JIRA_ERROR_CODE } from "../src/jira/client.js";
 
 describe("Jira tools", () => {
   beforeEach(() => {
+    findCredentials.mockReset();
+    findCredentials.mockReturnValue([{ password: "test-token" }]);
     vi.stubEnv("JIRA_URL", "https://jira.example.test/jira");
   });
 
   afterEach(() => {
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+  });
+
+  it.each([
+    [200, "authenticated"],
+    [204, "authenticated"],
+    [302, "unverified"],
+    [401, "rejected"],
+    [403, "rejected"],
+    [500, "unverified"],
+  ] as const)(
+    "diagnoses authenticated Jira HTTP %i as %s",
+    async (status, authenticationStatus) => {
+      const fetch = vi.fn(
+        async () => new Response(status === 204 ? null : "private Jira body", { status }),
+      );
+      vi.stubGlobal("fetch", fetch);
+
+      const response = await new DiagnoseJiraConnectionTool().toolCall({
+        params: { name: "diagnose-jira-connection", arguments: {} },
+      });
+
+      expect(response.isError).toBeUndefined();
+      expect(response.structuredContent).toEqual({
+        configured: true,
+        credentialsFound: true,
+        reachable: true,
+        authenticationStatus,
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("diagnoses reachability without credentials or an Authorization header", async () => {
+    findCredentials.mockReturnValue([]);
+    const fetch = vi.fn(async () => new Response("private Jira body", { status: 401 }));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new DiagnoseJiraConnectionTool().toolCall({
+      params: { name: "diagnose-jira-connection", arguments: {} },
+    });
+
+    expect(response.structuredContent).toEqual({
+      configured: true,
+      credentialsFound: false,
+      reachable: true,
+      authenticationStatus: "unverified",
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      new URL("https://jira.example.test/jira/rest/api/2/myself"),
+      expect.objectContaining({ headers: { Accept: "application/json" } }),
+    );
+  });
+
+  it("checks credentials independently when the Jira URL is invalid", async () => {
+    vi.stubEnv("JIRA_URL", "ftp://jira.example.test/private");
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new DiagnoseJiraConnectionTool().toolCall({
+      params: { name: "diagnose-jira-connection", arguments: {} },
+    });
+
+    expect(response.structuredContent).toEqual({
+      configured: false,
+      credentialsFound: true,
+      reachable: false,
+      authenticationStatus: "unverified",
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    new Error("private network details"),
+    new DOMException("private timeout", "TimeoutError"),
+  ])("reports a failed Jira connection without leaking %s", async (failure) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw failure;
+      }),
+    );
+
+    const response = await new DiagnoseJiraConnectionTool().toolCall({
+      params: { name: "diagnose-jira-connection", arguments: {} },
+    });
+
+    expect(response.structuredContent).toEqual({
+      configured: true,
+      credentialsFound: true,
+      reachable: false,
+      authenticationStatus: "unverified",
+    });
+    expect(JSON.stringify(response)).not.toContain(failure.message);
+  });
+
+  it("rejects non-empty diagnostic input before contacting Jira", async () => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new DiagnoseJiraConnectionTool().toolCall({
+      params: {
+        name: "diagnose-jira-connection",
+        arguments: { revealSecrets: true },
+      },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("returns a structured Jira issue with hierarchy, links and versions", async () => {

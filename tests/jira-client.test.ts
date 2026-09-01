@@ -3,6 +3,58 @@ import { z } from "zod";
 import { JIRA_ERROR_CODE, createJiraClient } from "../src/jira/client.js";
 
 describe("Jira HTTP client", () => {
+  it("probes Jira without credentials and accepts any HTTP status", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 302 }));
+    const getToken = vi.fn(() => "");
+    const client = createJiraClient({
+      fetch,
+      getJiraUrl: () => "https://jira.example.test/jira",
+      getToken,
+      timeoutMs: 1_000,
+    });
+
+    await expect(client.probe({ pathname: "rest/api/2/myself" })).resolves.toEqual({
+      configured: true,
+      credentialsFound: false,
+      status: 302,
+    });
+    expect(getToken).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledWith(
+      new URL("https://jira.example.test/jira/rest/api/2/myself"),
+      {
+        headers: { Accept: "application/json" },
+        redirect: "manual",
+        signal: expect.any(AbortSignal),
+      },
+    );
+  });
+
+  it("adds configured credentials to a Jira probe", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 204 }));
+    const client = createJiraClient({
+      fetch,
+      getJiraUrl: () => "https://jira.example.test",
+      getToken: () => "secret-token",
+      timeoutMs: 1_000,
+    });
+
+    await expect(client.probe({ pathname: "rest/api/2/myself" })).resolves.toEqual({
+      configured: true,
+      credentialsFound: true,
+      status: 204,
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      new URL("https://jira.example.test/rest/api/2/myself"),
+      expect.objectContaining({
+        headers: {
+          Accept: "application/json",
+          Authorization: "Bearer secret-token",
+        },
+        redirect: "manual",
+      }),
+    );
+  });
+
   it("gets and validates JSON through a safe Jira URL", async () => {
     const fetch = vi.fn(async () => Response.json({ id: "10001" }));
     const client = createJiraClient({
