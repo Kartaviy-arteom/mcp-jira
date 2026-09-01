@@ -1,13 +1,7 @@
 import { MCPTool, MCPInput } from "mcp-framework";
 import { z } from "zod";
 import { JIRA_ERROR_CODE, JiraClientError, jiraClient } from "../jira/client.js";
-
-const issueKeySchema = z
-  .string()
-  .trim()
-  .toUpperCase()
-  .regex(/^[A-Z][A-Z0-9_]*-\d+$/)
-  .describe("Jira issue key, for example OMSAGORA-3520");
+import { issueKeySchema } from "../jira/schemas.js";
 
 const inputSchema = z.object({ issueKey: issueKeySchema }).strict();
 

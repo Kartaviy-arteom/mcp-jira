@@ -11,6 +11,7 @@ vi.mock("@napi-rs/keyring", () => ({
 import DiagnoseJiraConnectionTool from "../src/tools/diagnoseJiraConnectionTool.js";
 import GetReleaseTasksTool from "../src/tools/getReleaseTasksTool.js";
 import GetTaskTool from "../src/tools/getTaskTool.js";
+import ListIssueAttachmentsTool from "../src/tools/listIssueAttachmentsTool.js";
 import { JIRA_ERROR_CODE } from "../src/jira/client.js";
 
 describe("Jira tools", () => {
@@ -314,6 +315,175 @@ describe("Jira tools", () => {
             code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
             message: "Jira returned an unexpected response.",
             httpStatus: 200,
+          }),
+        },
+      ],
+      isError: true,
+    });
+  });
+
+  it("lists supported and unsupported Jira issue attachments", async () => {
+    const fetch = vi.fn(async () =>
+      Response.json({
+        fields: {
+          attachment: [
+            {
+              self: "https://jira.example.test/jira/rest/api/2.0/attachments/12345",
+              filename: "design.png",
+              mimeType: "image/png",
+              size: 248310,
+            },
+            {
+              self: "https://jira.example.test/jira/rest/api/2/attachment/12346",
+              filename: "photo.jpg",
+              mimeType: "image/jpeg",
+              size: 1542,
+            },
+            {
+              self: "https://jira.example.test/jira/rest/api/2/attachment/12347",
+              filename: "preview.webp",
+              mimeType: "image/webp",
+              size: 812,
+            },
+            {
+              self: "https://jira.example.test/jira/rest/api/2/attachment/12348",
+              filename: "notes.txt",
+              mimeType: "text/plain",
+              size: 32,
+            },
+          ],
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ListIssueAttachmentsTool().toolCall({
+      params: { name: "list-issue-attachments", arguments: { issueKey: " oms-1 " } },
+    });
+
+    expect(response.isError).toBeUndefined();
+    expect(response.structuredContent).toEqual({
+      attachments: [
+        {
+          id: "12345",
+          filename: "design.png",
+          mimeType: "image/png",
+          size: 248310,
+          supported: true,
+        },
+        {
+          id: "12346",
+          filename: "photo.jpg",
+          mimeType: "image/jpeg",
+          size: 1542,
+          supported: true,
+        },
+        {
+          id: "12347",
+          filename: "preview.webp",
+          mimeType: "image/webp",
+          size: 812,
+          supported: true,
+        },
+        {
+          id: "12348",
+          filename: "notes.txt",
+          mimeType: "text/plain",
+          size: 32,
+          supported: false,
+        },
+      ],
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledWith(
+      new URL("https://jira.example.test/jira/rest/api/2/issue/OMS-1?fields=attachment"),
+      expect.objectContaining({ redirect: "error" }),
+    );
+  });
+
+  it("returns an empty attachment list", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ fields: { attachment: [] } })),
+    );
+
+    const response = await new ListIssueAttachmentsTool().toolCall({
+      params: { name: "list-issue-attachments", arguments: { issueKey: "OMS-1" } },
+    });
+
+    expect(response.structuredContent).toEqual({ attachments: [] });
+  });
+
+  it.each([{ issueKey: "not a key" }, { issueKey: "OMS-1", unexpected: true }])(
+    "rejects invalid list-issue-attachments input before fetch",
+    async (input) => {
+      const fetch = vi.fn();
+      vi.stubGlobal("fetch", fetch);
+
+      const response = await new ListIssueAttachmentsTool().toolCall({
+        params: { name: "list-issue-attachments", arguments: input },
+      });
+
+      expect(response.isError).toBe(true);
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects an incompatible Jira attachment self URI", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          fields: {
+            attachment: [
+              {
+                self: "https://jira.example.test/jira/rest/api/2/attachment/not-numeric",
+                filename: "design.png",
+                mimeType: "image/png",
+                size: 248310,
+              },
+            ],
+          },
+        }),
+      ),
+    );
+
+    const response = await new ListIssueAttachmentsTool().toolCall({
+      params: { name: "list-issue-attachments", arguments: { issueKey: "OMS-1" } },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
+            message: "Jira returned an unexpected response.",
+          }),
+        },
+      ],
+      isError: true,
+    });
+  });
+
+  it("returns ISSUE_NOT_FOUND when listing attachments for a missing issue", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("private Jira response", { status: 404 })),
+    );
+
+    const response = await new ListIssueAttachmentsTool().toolCall({
+      params: { name: "list-issue-attachments", arguments: { issueKey: "OMS-404" } },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
+            message: "Jira issue was not found.",
+            httpStatus: 404,
           }),
         },
       ],
