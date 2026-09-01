@@ -10,6 +10,7 @@ vi.mock("@napi-rs/keyring", () => ({
 
 import DiagnoseJiraConnectionTool from "../src/tools/diagnoseJiraConnectionTool.js";
 import GetIssueAttachmentTool from "../src/tools/getIssueAttachmentTool.js";
+import GetIssueWorklogsTool from "../src/tools/getIssueWorklogsTool.js";
 import GetReleaseTasksTool from "../src/tools/getReleaseTasksTool.js";
 import GetTaskTool from "../src/tools/getTaskTool.js";
 import ListIssueAttachmentsTool from "../src/tools/listIssueAttachmentsTool.js";
@@ -47,6 +48,158 @@ describe("Jira tools", () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+  });
+
+  it("returns an empty anonymous worklog summary", async () => {
+    const fetch = vi.fn(async () => Response.json({ total: 0, worklogs: [] }));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetIssueWorklogsTool().toolCall({
+      params: { name: "get-issue-worklogs", arguments: { issueKey: " oms-1 " } },
+    });
+
+    expect(response.isError).toBeUndefined();
+    expect(response.structuredContent).toEqual({
+      issueKey: "OMS-1",
+      totalTimeSeconds: 0,
+      contributorsCount: 0,
+      worklogsCount: 0,
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledWith(
+      new URL("https://jira.example.test/jira/rest/api/2/issue/OMS-1/worklog"),
+      expect.objectContaining({ redirect: "error" }),
+    );
+  });
+
+  it("sums time and deduplicates contributors in separate identifier namespaces", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          total: 4,
+          worklogs: [
+            { author: { key: "employee-1", name: "legacy-1" }, timeSpentSeconds: 600 },
+            { author: { key: "employee-1", name: "changed-name" }, timeSpentSeconds: 1200 },
+            { author: { name: "legacy-1" }, timeSpentSeconds: 300 },
+            { author: { key: "employee-2" }, timeSpentSeconds: 900 },
+          ],
+        }),
+      ),
+    );
+
+    const response = await new GetIssueWorklogsTool().toolCall({
+      params: { name: "get-issue-worklogs", arguments: { issueKey: "OMS-1" } },
+    });
+
+    expect(response.structuredContent).toEqual({
+      issueKey: "OMS-1",
+      totalTimeSeconds: 3000,
+      contributorsCount: 3,
+      worklogsCount: 4,
+    });
+  });
+
+  it.each([
+    { author: {}, timeSpentSeconds: 600, comment: "private comment" },
+    { timeSpentSeconds: 600, comment: "private comment" },
+  ])("rejects a worklog whose author has no supported identifier", async (worklog) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          total: 1,
+          worklogs: [worklog],
+        }),
+      ),
+    );
+
+    const response = await new GetIssueWorklogsTool().toolCall({
+      params: { name: "get-issue-worklogs", arguments: { issueKey: "OMS-1" } },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
+            message: "Jira returned an unexpected response.",
+            httpStatus: 200,
+          }),
+        },
+      ],
+      isError: true,
+    });
+    expect(JSON.stringify(response)).not.toContain("private comment");
+  });
+
+  it.each([{ issueKey: "invalid" }, { issueKey: "OMS-1", includeAuthors: true }])(
+    "rejects invalid get-issue-worklogs input before fetch: %j",
+    async (input) => {
+      const fetch = vi.fn();
+      vi.stubGlobal("fetch", fetch);
+
+      const response = await new GetIssueWorklogsTool().toolCall({
+        params: { name: "get-issue-worklogs", arguments: input },
+      });
+
+      expect(response.isError).toBe(true);
+      expect(fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("returns ISSUE_NOT_FOUND for a missing worklog issue", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("private Jira response", { status: 404 })),
+    );
+
+    const response = await new GetIssueWorklogsTool().toolCall({
+      params: { name: "get-issue-worklogs", arguments: { issueKey: "OMS-404" } },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
+            message: "Jira issue was not found.",
+            httpStatus: 404,
+          }),
+        },
+      ],
+      isError: true,
+    });
+  });
+
+  it("rejects an incomplete worklog response", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          total: 2,
+          worklogs: [{ author: { key: "private-employee-id" }, timeSpentSeconds: 600 }],
+        }),
+      ),
+    );
+
+    const response = await new GetIssueWorklogsTool().toolCall({
+      params: { name: "get-issue-worklogs", arguments: { issueKey: "OMS-1" } },
+    });
+
+    expect(response.content).toEqual([
+      {
+        type: "text",
+        text: JSON.stringify({
+          code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
+          message: "Jira returned an unexpected response.",
+        }),
+      },
+    ]);
+    expect(response.isError).toBe(true);
+    expect(JSON.stringify(response)).not.toContain("private-employee-id");
   });
 
   it.each([
