@@ -321,14 +321,20 @@ describe("Jira tools", () => {
     });
   });
 
-  it("gets release tasks using a validated releaseId", async () => {
+  it("gets the first release task page without descriptions by default", async () => {
     const fetch = vi.fn(async () =>
       Response.json({
+        total: 3,
         issues: [
           {
             id: "10002",
             key: "OMS-2",
-            fields: { summary: "Migrate tool", description: "Done safely" },
+            fields: { summary: "Migrate tool", status: { name: "In Progress" } },
+          },
+          {
+            id: "10003",
+            key: "OMS-3",
+            fields: { summary: "Test tool", status: { name: "To Do" } },
           },
         ],
       }),
@@ -343,37 +349,181 @@ describe("Jira tools", () => {
     });
 
     expect(response.isError).toBeUndefined();
-    expect(
-      JSON.parse(response.content[0]?.type === "text" ? response.content[0].text : "null"),
-    ).toEqual([
-      {
-        id: "10002",
-        key: "OMS-2",
-        summary: "Migrate tool",
-        description: "Done safely",
-      },
-    ]);
+    expect(response.structuredContent).toEqual({
+      tasks: [
+        {
+          id: "10002",
+          key: "OMS-2",
+          summary: "Migrate tool",
+          status: "In Progress",
+        },
+        {
+          id: "10003",
+          key: "OMS-3",
+          summary: "Test tool",
+          status: "To Do",
+        },
+      ],
+      total: 3,
+      nextStartAt: 2,
+    });
     expect(fetch).toHaveBeenCalledWith(
       new URL(
-        "https://jira.example.test/jira/rest/api/2/search?jql=fixVersion%3D18136&startAt=0&maxResults=500&fields=summary%2Cstatus%2Cdescription",
+        "https://jira.example.test/jira/rest/api/2/search?jql=fixVersion%3D18136&startAt=0&maxResults=100&fields=summary%2Cstatus",
       ),
       expect.objectContaining({ redirect: "error" }),
     );
   });
 
-  it("rejects a non-numeric releaseId before fetch", async () => {
+  it("gets a configured release task page with descriptions", async () => {
+    const fetch = vi.fn(async () =>
+      Response.json({
+        total: 7,
+        issues: [
+          {
+            id: "10005",
+            key: "OMS-5",
+            fields: {
+              summary: "Document tool",
+              status: { name: "Done" },
+              description: null,
+            },
+          },
+          {
+            id: "10006",
+            key: "OMS-6",
+            fields: {
+              summary: "Publish tool",
+              status: { name: "In Progress" },
+              description: "Release notes are ready",
+            },
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetReleaseTasksTool().toolCall({
+      params: {
+        name: "get-release-tasks",
+        arguments: { releaseId: "18136", includeDescription: true, startAt: 5, limit: 20 },
+      },
+    });
+
+    expect(response.structuredContent).toEqual({
+      tasks: [
+        {
+          id: "10005",
+          key: "OMS-5",
+          summary: "Document tool",
+          status: "Done",
+          description: null,
+        },
+        {
+          id: "10006",
+          key: "OMS-6",
+          summary: "Publish tool",
+          status: "In Progress",
+          description: "Release notes are ready",
+        },
+      ],
+      total: 7,
+      nextStartAt: null,
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      new URL(
+        "https://jira.example.test/jira/rest/api/2/search?jql=fixVersion%3D18136&startAt=5&maxResults=20&fields=summary%2Cstatus%2Cdescription",
+      ),
+      expect.objectContaining({ redirect: "error" }),
+    );
+  });
+
+  it.each([1, 100])("accepts the release task page limit boundary %i", async (limit) => {
+    const fetch = vi.fn(async () => Response.json({ total: 0, issues: [] }));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetReleaseTasksTool().toolCall({
+      params: {
+        name: "get-release-tasks",
+        arguments: { releaseId: "18136", limit },
+      },
+    });
+
+    expect(response.isError).toBeUndefined();
+    expect(fetch).toHaveBeenCalledWith(
+      new URL(
+        `https://jira.example.test/jira/rest/api/2/search?jql=fixVersion%3D18136&startAt=0&maxResults=${limit}&fields=summary%2Cstatus`,
+      ),
+      expect.objectContaining({ redirect: "error" }),
+    );
+  });
+
+  it.each([
+    { releaseId: "18136 OR project=PRIVATE" },
+    { releaseId: "" },
+    { releaseId: "18136", startAt: -1 },
+    { releaseId: "18136", startAt: 1.5 },
+    { releaseId: "18136", limit: 0 },
+    { releaseId: "18136", limit: 101 },
+    { releaseId: "18136", limit: 1.5 },
+    { releaseId: "18136", issueKey: "OMS-1" },
+    { releaseId: "18136", jql: "project=PRIVATE" },
+  ])("rejects invalid get-release-tasks input before fetch: %j", async (input) => {
     const fetch = vi.fn();
     vi.stubGlobal("fetch", fetch);
 
     const response = await new GetReleaseTasksTool().toolCall({
       params: {
         name: "get-release-tasks",
-        arguments: { releaseId: "18136 OR project=PRIVATE" },
+        arguments: input,
       },
     });
 
     expect(response.isError).toBe(true);
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("returns null pagination for an empty final release page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ total: 4, issues: [] })),
+    );
+
+    const response = await new GetReleaseTasksTool().toolCall({
+      params: {
+        name: "get-release-tasks",
+        arguments: { releaseId: "18136", startAt: 4 },
+      },
+    });
+
+    expect(response.structuredContent).toEqual({ tasks: [], total: 4, nextStartAt: null });
+  });
+
+  it("rejects an empty release page when Jira claims more tasks", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ total: 5, issues: [] })),
+    );
+
+    const response = await new GetReleaseTasksTool().toolCall({
+      params: {
+        name: "get-release-tasks",
+        arguments: { releaseId: "18136", startAt: 4 },
+      },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
+            message: "Jira returned an unexpected response.",
+          }),
+        },
+      ],
+      isError: true,
+    });
   });
 
   it("returns only the safe Jira error through MCP", async () => {
