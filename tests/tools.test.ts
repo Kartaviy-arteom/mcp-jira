@@ -167,6 +167,70 @@ describe("Jira tools", () => {
     );
   });
 
+  it("executes a transition matched by name when unrelated Jira field metadata is partial", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMSAGORA-5614", fields: { status: { id: "1", name: "Уточнена" } } }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          transitions: [
+            {
+              id: "471",
+              name: "На Паузу",
+              to: { id: "3", name: "ON HOLD" },
+              fields: {},
+            },
+            {
+              id: "551",
+              name: "Завершена",
+              to: { id: "5", name: "Завершена" },
+              fields: {
+                resolution: {
+                  required: true,
+                  name: "Решение",
+                  schema: { type: "resolution", system: "resolution" },
+                },
+              },
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        Response.json({
+          key: "OMSAGORA-5614",
+          fields: { status: { id: "3", name: "ON HOLD" } },
+        }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: "OMSAGORA-5614", targetStatus: " на паузу " },
+      },
+    });
+
+    expect(response.structuredContent).toEqual({
+      issueKey: "OMSAGORA-5614",
+      previousStatus: { id: "1", name: "Уточнена" },
+      newStatus: { id: "3", name: "ON HOLD" },
+      transition: { id: "471", name: "На Паузу" },
+      changed: true,
+    });
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch).toHaveBeenNthCalledWith(
+      3,
+      new URL("https://jira.example.test/jira/rest/api/2/issue/OMSAGORA-5614/transitions"),
+      expect.objectContaining({
+        method: "POST",
+        body: '{"transition":{"id":"471"}}',
+      }),
+    );
+  });
+
   it("returns every available transition in Jira order when the target is unavailable", async () => {
     const fetch = vi
       .fn()
@@ -366,7 +430,6 @@ describe("Jira tools", () => {
                 resolution: {
                   required: true,
                   name: "Resolution",
-                  hasDefaultValue: false,
                   schema: { type: "resolution", system: "resolution" },
                 },
               },
@@ -383,9 +446,23 @@ describe("Jira tools", () => {
       },
     });
 
-    expect(JSON.parse(response.content[0]!.text)).toMatchObject({
+    expect(JSON.parse(response.content[0]!.text)).toEqual({
       code: JIRA_ERROR_CODE.TRANSITION_REQUIRES_FIELDS,
-      details: { requiredFields: [{ id: "resolution", name: "Resolution" }] },
+      message: "The Jira transition requires fields that this tool does not support.",
+      details: {
+        transition: {
+          id: "41",
+          name: "Complete",
+          targetStatus: { id: "5", name: "Done" },
+        },
+        requiredFields: [
+          {
+            id: "resolution",
+            name: "Resolution",
+            schema: { type: "resolution", system: "resolution" },
+          },
+        ],
+      },
     });
     expect(fetch).toHaveBeenCalledTimes(2);
   });
@@ -512,7 +589,7 @@ describe("Jira tools", () => {
 
     expect(definition).toMatchObject({
       name: "change-issue-status",
-      description: "Changes a Jira issue's status by executing one available workflow transition.",
+      description: "Changes a Jira issue's status by matching a target status or transition name.",
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
@@ -523,7 +600,10 @@ describe("Jira tools", () => {
         type: "object",
         properties: {
           issueKey: { type: "string", description: expect.any(String) },
-          targetStatus: { type: "string", description: expect.any(String) },
+          targetStatus: {
+            type: "string",
+            description: "Target Jira workflow status or transition name, for example In Progress.",
+          },
         },
         required: ["issueKey", "targetStatus"],
       },

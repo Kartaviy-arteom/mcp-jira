@@ -15,7 +15,7 @@ const inputSchema = z
       .string()
       .trim()
       .min(1)
-      .describe("Target Jira workflow status name, for example In Progress."),
+      .describe("Target Jira workflow status or transition name, for example In Progress."),
   })
   .strict();
 
@@ -45,15 +45,17 @@ const jiraIssueStatusSchema = z.object({
 
 const jiraFieldSchema = z.object({
   required: z.boolean(),
-  name: z.string(),
-  hasDefaultValue: z.boolean(),
-  schema: z.object({
-    type: z.string(),
-    items: z.string().optional(),
-    system: z.string().optional(),
-    custom: z.string().optional(),
-    customId: z.number().optional(),
-  }),
+  name: z.string().optional(),
+  hasDefaultValue: z.boolean().optional(),
+  schema: z
+    .object({
+      type: z.string(),
+      items: z.string().optional(),
+      system: z.string().optional(),
+      custom: z.string().optional(),
+      customId: z.number().optional(),
+    })
+    .optional(),
 });
 
 const jiraTransitionSchema = z.object({
@@ -73,9 +75,9 @@ const publicTransitionSchema = z.object({
 
 const requiredFieldSchema = z.object({
   id: z.string(),
-  name: z.string(),
-  hasDefaultValue: z.boolean(),
-  schema: jiraFieldSchema.shape.schema,
+  name: z.string().optional(),
+  hasDefaultValue: z.boolean().optional(),
+  schema: jiraFieldSchema.shape.schema.optional(),
 });
 
 const transitionNotAvailableDetailsSchema = z.object({
@@ -111,9 +113,13 @@ const transitionStatusMismatchDetailsSchema = z.object({
   transition: executedTransitionSchema,
 });
 
-const normalizeStatusName = (name: string): string => name.trim().toLowerCase();
+const normalizeWorkflowName = (name: string): string => name.trim().toLowerCase();
 
-const toPublicTransition = (transition: z.infer<typeof jiraTransitionSchema>) => ({
+const toPublicTransition = (transition: {
+  id: string;
+  name: string;
+  to: z.infer<typeof statusSchema>;
+}) => ({
   id: transition.id,
   name: transition.name,
   targetStatus: transition.to,
@@ -121,7 +127,7 @@ const toPublicTransition = (transition: z.infer<typeof jiraTransitionSchema>) =>
 
 class ChangeIssueStatusTool extends MCPTool {
   name = "change-issue-status";
-  description = "Changes a Jira issue's status by executing one available workflow transition.";
+  description = "Changes a Jira issue's status by matching a target status or transition name.";
   schema = inputSchema;
   protected outputSchemaShape = outputSchema;
   annotations = {
@@ -155,7 +161,7 @@ class ChangeIssueStatusTool extends MCPTool {
     });
     const previousStatus = issue.fields.status;
 
-    if (normalizeStatusName(previousStatus.name) === normalizeStatusName(input.targetStatus)) {
+    if (normalizeWorkflowName(previousStatus.name) === normalizeWorkflowName(input.targetStatus)) {
       return outputSchema.parse({
         issueKey: issue.key,
         previousStatus,
@@ -171,9 +177,10 @@ class ChangeIssueStatusTool extends MCPTool {
       schema: jiraTransitionsSchema,
       notFoundCode: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
     });
-    const candidates = transitions.transitions.filter(
-      (transition) =>
-        normalizeStatusName(transition.to.name) === normalizeStatusName(input.targetStatus),
+    const candidates = transitions.transitions.filter((transition) =>
+      [transition.to.name, transition.name].some(
+        (name) => normalizeWorkflowName(name) === normalizeWorkflowName(input.targetStatus),
+      ),
     );
 
     if (candidates.length === 0) {
@@ -203,7 +210,12 @@ class ChangeIssueStatusTool extends MCPTool {
     const transition = candidates[0]!;
     const requiredFields = Object.entries(transition.fields)
       .filter(([, field]) => field.required)
-      .map(([id, field]) => ({ id, ...field }));
+      .map(([id, field]) => ({
+        id,
+        name: field.name,
+        hasDefaultValue: field.hasDefaultValue,
+        schema: field.schema,
+      }));
     if (requiredFields.length > 0) {
       throw new JiraClientError(
         JIRA_ERROR_CODE.TRANSITION_REQUIRES_FIELDS,
