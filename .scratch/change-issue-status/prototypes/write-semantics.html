@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PROTOTYPE: проверенная смена статуса Jira</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: system-ui, sans-serif;
+        background: #f4f6fa;
+        color: #172033;
+      }
+      body {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 32px 20px;
+      }
+      h1,
+      h2 {
+        margin-bottom: 8px;
+      }
+      .note,
+      .panel {
+        background: white;
+        border: 1px solid #d8deea;
+        border-radius: 10px;
+        padding: 16px;
+        margin: 16px 0;
+      }
+      .note {
+        border-left: 5px solid #4969e8;
+      }
+      dl {
+        display: grid;
+        grid-template-columns: 190px 1fr;
+        gap: 8px 16px;
+        margin: 0;
+      }
+      dt {
+        font-weight: 650;
+      }
+      dd {
+        margin: 0;
+      }
+      button {
+        border: 1px solid #4969e8;
+        border-radius: 7px;
+        background: white;
+        color: #2744b4;
+        padding: 9px 12px;
+        cursor: pointer;
+      }
+      button:hover,
+      button.active {
+        background: #4969e8;
+        color: white;
+      }
+      .buttons,
+      .tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .outcome {
+        font-weight: 700;
+      }
+      code {
+        background: #eef1f7;
+        padding: 2px 5px;
+        border-radius: 4px;
+      }
+      ol button {
+        margin: 4px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>PROTOTYPE: проверенная смена статуса Jira</h1>
+    <p class="note">
+      Вопрос: достаточно ли точно модель различает no-op, подтверждённый переход, неизвестный
+      результат проверки и наблюдаемый конкурентный статус? Это одноразовый интерактивный прототип,
+      а не production-код.
+    </p>
+
+    <section class="panel">
+      <h2>Наблюдаемое состояние</h2>
+      <dl id="state"></dl>
+    </section>
+
+    <section class="panel">
+      <h2>Свободная проверка</h2>
+      <div class="buttons" id="actions"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Сценарии</h2>
+      <div class="tabs" id="tabs"></div>
+      <div id="walkthrough"></div>
+    </section>
+
+    <script>
+      const initialState = () => ({
+        phase: "До первого чтения",
+        previousStatus: "не прочитан",
+        selectedTransition: "не выбран",
+        post: "не отправлен",
+        verifiedStatus: "не прочитан",
+        outcome: "нет результата",
+      });
+
+      const reduce = (state, action) => {
+        if (action === "reset") return initialState();
+        if (action === "read-open")
+          return { ...state, phase: "Исходное состояние прочитано", previousStatus: "Open (1)" };
+        if (action === "read-target")
+          return {
+            ...state,
+            phase: "Завершено без записи",
+            previousStatus: "In Progress (3)",
+            verifiedStatus: "In Progress (3)",
+            outcome: "Успех: changed=false, transition=null",
+          };
+        if (action === "select")
+          return {
+            ...state,
+            phase: "Переход выбран",
+            selectedTransition: "Start Progress (5) → In Progress (3)",
+          };
+        if (action === "post-204")
+          return { ...state, phase: "Jira приняла POST", post: "204; результат ещё не проверен" };
+        if (action === "post-error")
+          return {
+            ...state,
+            phase: "POST завершился ошибкой",
+            post: "нормализованная ошибка",
+            outcome: "Ошибка; автоматического чтения или retry нет",
+          };
+        if (action === "verify-target")
+          return {
+            ...state,
+            phase: "Переход проверен",
+            verifiedStatus: "In Progress (3)",
+            outcome: "Успех: changed=true",
+          };
+        if (action === "verify-failed")
+          return {
+            ...state,
+            phase: "Результат неизвестен",
+            verifiedStatus: "GET завершился ошибкой",
+            outcome: "TRANSITION_VERIFICATION_FAILED",
+          };
+        if (action === "verify-mismatch")
+          return {
+            ...state,
+            phase: "Наблюдается другой статус",
+            verifiedStatus: "Done (4)",
+            outcome: "TRANSITION_STATUS_MISMATCH",
+          };
+        return state;
+      };
+
+      const labels = {
+        reset: "Сбросить",
+        "read-open": "Прочитать Open",
+        "read-target": "Прочитать уже целевой статус",
+        select: "Выбрать переход",
+        "post-204": "Получить 204",
+        "post-error": "Получить ошибку POST",
+        "verify-target": "Проверить целевой статус",
+        "verify-failed": "Получить ошибку проверки",
+        "verify-mismatch": "Увидеть конкурентный статус",
+      };
+
+      const scenarios = {
+        "Успешный переход": ["read-open", "select", "post-204", "verify-target"],
+        "No-op": ["read-target"],
+        "Проверка недоступна": ["read-open", "select", "post-204", "verify-failed"],
+        "Конкурентный переход": ["read-open", "select", "post-204", "verify-mismatch"],
+        "POST отклонён": ["read-open", "select", "post-error"],
+      };
+
+      let state = initialState();
+      let activeScenario = Object.keys(scenarios)[0];
+      let step = 0;
+
+      const dispatch = (action) => {
+        state = reduce(state, action);
+        render();
+      };
+
+      const startScenario = (name) => {
+        activeScenario = name;
+        step = 0;
+        state = initialState();
+        render();
+      };
+
+      const runStep = () => {
+        const action = scenarios[activeScenario][step];
+        state = reduce(state, action);
+        step += 1;
+        render();
+      };
+
+      const render = () => {
+        document.querySelector("#state").innerHTML = Object.entries(state)
+          .map(
+            ([key, value]) =>
+              `<dt>${{ phase: "Этап", previousStatus: "Исходный статус", selectedTransition: "Переход", post: "POST", verifiedStatus: "Проверенный статус", outcome: "Результат" }[key]}</dt><dd class="${key === "outcome" ? "outcome" : ""}">${value}</dd>`,
+          )
+          .join("");
+
+        document.querySelector("#actions").innerHTML = Object.entries(labels)
+          .map(([action, label]) => `<button data-action="${action}">${label}</button>`)
+          .join("");
+
+        document.querySelector("#tabs").innerHTML = Object.keys(scenarios)
+          .map(
+            (name) =>
+              `<button data-scenario="${name}" class="${name === activeScenario ? "active" : ""}">${name}</button>`,
+          )
+          .join("");
+
+        const actions = scenarios[activeScenario];
+        document.querySelector("#walkthrough").innerHTML = `
+          <p>Нажимайте шаги по порядку и следите за результатом. Новый запуск сбрасывает состояние.</p>
+          <ol>${actions
+            .map(
+              (action, index) =>
+                `<li><button data-step="${index}" ${index === step ? "" : "disabled"}>${labels[action]}</button></li>`,
+            )
+            .join("")}</ol>`;
+
+        document
+          .querySelectorAll("[data-action]")
+          .forEach((button) =>
+            button.addEventListener("click", () => dispatch(button.dataset.action)),
+          );
+        document
+          .querySelectorAll("[data-scenario]")
+          .forEach((button) =>
+            button.addEventListener("click", () => startScenario(button.dataset.scenario)),
+          );
+        document.querySelector("[data-step]:not([disabled])")?.addEventListener("click", runStep);
+      };
+
+      render();
+    </script>
+  </body>
+</html>
