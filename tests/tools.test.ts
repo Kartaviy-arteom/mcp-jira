@@ -9,10 +9,32 @@ vi.mock("@napi-rs/keyring", () => ({
 }));
 
 import DiagnoseJiraConnectionTool from "../src/tools/diagnoseJiraConnectionTool.js";
+import GetIssueAttachmentTool from "../src/tools/getIssueAttachmentTool.js";
 import GetReleaseTasksTool from "../src/tools/getReleaseTasksTool.js";
 import GetTaskTool from "../src/tools/getTaskTool.js";
 import ListIssueAttachmentsTool from "../src/tools/listIssueAttachmentsTool.js";
 import { JIRA_ERROR_CODE } from "../src/jira/client.js";
+
+type JiraAttachmentFixture = {
+  self: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  content: string;
+};
+
+const jiraAttachment = (overrides: Partial<JiraAttachmentFixture> = {}): JiraAttachmentFixture => ({
+  self: "https://jira.example.test/jira/rest/api/2/attachment/12345",
+  filename: "design.png",
+  mimeType: "image/png",
+  size: 9,
+  content: "https://jira.example.test/jira/attachments/12345",
+  ...overrides,
+});
+
+const jiraIssueAttachments = (...attachment: JiraAttachmentFixture[]) => ({
+  fields: { attachment },
+});
 
 describe("Jira tools", () => {
   beforeEach(() => {
@@ -22,6 +44,7 @@ describe("Jira tools", () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
   });
@@ -484,6 +507,413 @@ describe("Jira tools", () => {
             code: JIRA_ERROR_CODE.ISSUE_NOT_FOUND,
             message: "Jira issue was not found.",
             httpStatus: 404,
+          }),
+        },
+      ],
+      isError: true,
+    });
+  });
+
+  it("returns a validated Jira PNG attachment as an MCP image", async () => {
+    const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json(
+          jiraIssueAttachments(
+            jiraAttachment({
+              size: png.byteLength,
+              content: "https://jira.example.test/jira/secure/attachment/12345/design.png",
+            }),
+          ),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(png, {
+          headers: {
+            "Content-Type": "IMAGE/PNG; charset=binary",
+            "Content-Length": String(png.byteLength),
+          },
+        }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetIssueAttachmentTool().toolCall({
+      params: {
+        name: "get-issue-attachment",
+        arguments: { issueKey: " oms-1 ", attachmentId: "12345" },
+      },
+    });
+
+    expect(response).toEqual({
+      content: [
+        { type: "image", data: Buffer.from(png).toString("base64"), mimeType: "image/png" },
+      ],
+      structuredContent: {
+        issueKey: "OMS-1",
+        attachmentId: "12345",
+        filename: "design.png",
+        mimeType: "image/png",
+        size: png.byteLength,
+      },
+    });
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      new URL("https://jira.example.test/jira/rest/api/2/issue/OMS-1?fields=attachment"),
+      expect.objectContaining({ redirect: "error" }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      new URL("https://jira.example.test/jira/secure/attachment/12345/design.png"),
+      expect.objectContaining({
+        headers: { Accept: "*/*", Authorization: "Bearer test-token" },
+        redirect: "error",
+      }),
+    );
+  });
+
+  it.each([
+    ["image/jpeg", "photo.jpg", Uint8Array.from([0xff, 0xd8, 0xff, 0xe0])],
+    [
+      "image/webp",
+      "preview.webp",
+      Uint8Array.from([0x52, 0x49, 0x46, 0x46, 0x04, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]),
+    ],
+  ] as const)("returns a validated %s Jira attachment", async (mimeType, filename, bytes) => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json(
+          jiraIssueAttachments(jiraAttachment({ filename, mimeType, size: bytes.byteLength })),
+        ),
+      )
+      .mockResolvedValueOnce(new Response(bytes, { headers: { "Content-Type": mimeType } }));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetIssueAttachmentTool().toolCall({
+      params: {
+        name: "get-issue-attachment",
+        arguments: { issueKey: "OMS-1", attachmentId: "12345" },
+      },
+    });
+
+    expect(response.content).toEqual([
+      { type: "image", data: Buffer.from(bytes).toString("base64"), mimeType },
+    ]);
+    expect(response.structuredContent).toMatchObject({ filename, mimeType });
+  });
+
+  it.each([
+    { issueKey: "not a key", attachmentId: "12345" },
+    { issueKey: "OMS-1", attachmentId: "not-numeric" },
+    { issueKey: "OMS-1", attachmentId: "12345", unexpected: true },
+  ])("rejects invalid get-issue-attachment input before fetch", async (input) => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetIssueAttachmentTool().toolCall({
+      params: { name: "get-issue-attachment", arguments: input },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not download an attachment that does not belong to the issue", async () => {
+    const fetch = vi.fn(async () =>
+      Response.json(
+        jiraIssueAttachments(
+          jiraAttachment({
+            self: "https://jira.example.test/jira/rest/api/2/attachment/99999",
+            filename: "other.png",
+            content: "https://jira.example.test/jira/attachments/99999",
+          }),
+        ),
+      ),
+    );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetIssueAttachmentTool().toolCall({
+      params: {
+        name: "get-issue-attachment",
+        arguments: { issueKey: "OMS-1", attachmentId: "12345" },
+      },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.ATTACHMENT_NOT_FOUND,
+            message: "Jira attachment was not found.",
+          }),
+        },
+      ],
+      isError: true,
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [
+      "text/plain",
+      32,
+      JIRA_ERROR_CODE.UNSUPPORTED_ATTACHMENT_TYPE,
+      "Jira attachment type is unsupported.",
+    ],
+    [
+      "image/png",
+      5 * 1024 * 1024 + 1,
+      JIRA_ERROR_CODE.ATTACHMENT_TOO_LARGE,
+      "Jira attachment exceeds the supported size limit.",
+    ],
+  ] as const)(
+    "rejects attachment metadata with MIME %s and size %i before download",
+    async (mimeType, size, code, message) => {
+      const fetch = vi.fn(async () =>
+        Response.json(
+          jiraIssueAttachments(jiraAttachment({ filename: "unsafe.bin", mimeType, size })),
+        ),
+      );
+      vi.stubGlobal("fetch", fetch);
+
+      const response = await new GetIssueAttachmentTool().toolCall({
+        params: {
+          name: "get-issue-attachment",
+          arguments: { issueKey: "OMS-1", attachmentId: "12345" },
+        },
+      });
+
+      expect(response).toEqual({
+        content: [{ type: "text", text: JSON.stringify({ code, message }) }],
+        isError: true,
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    "http://jira.example.test/jira/attachments/12345",
+    "https://external.example.test/jira/attachments/12345",
+    "https://jira.example.test/other/attachments/12345",
+    "https://jira.example.test/jira/attachments/99999",
+    "https://jira.example.test/jira/secure/attachment/99999/design.png",
+    "https://jira.example.test/jira/secure/attachment/12345/path/design.png",
+    "https://jira.example.test/jira/attachments/12345?token=private",
+  ])("rejects incompatible Jira attachment content URI %s", async (content) => {
+    const fetch = vi.fn(async () =>
+      Response.json(jiraIssueAttachments(jiraAttachment({ content }))),
+    );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetIssueAttachmentTool().toolCall({
+      params: {
+        name: "get-issue-attachment",
+        arguments: { issueKey: "OMS-1", attachmentId: "12345" },
+      },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
+            message: "Jira returned an unexpected response.",
+          }),
+        },
+      ],
+      isError: true,
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(response)).not.toContain(content);
+  });
+
+  it.each([
+    ["image/jpeg", Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])],
+    ["image/png", Uint8Array.from([0x89, 0x50, 0x4e, 0x00])],
+  ] as const)(
+    "rejects an image response with Content-Type %s or an incompatible signature",
+    async (responseMimeType, bytes) => {
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          Response.json(jiraIssueAttachments(jiraAttachment({ size: bytes.byteLength }))),
+        )
+        .mockResolvedValueOnce(
+          new Response(bytes, { headers: { "Content-Type": responseMimeType } }),
+        );
+      vi.stubGlobal("fetch", fetch);
+
+      const response = await new GetIssueAttachmentTool().toolCall({
+        params: {
+          name: "get-issue-attachment",
+          arguments: { issueKey: "OMS-1", attachmentId: "12345" },
+        },
+      });
+
+      expect(response).toEqual({
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
+              message: "Jira returned an unexpected response.",
+            }),
+          },
+        ],
+        isError: true,
+      });
+    },
+  );
+
+  it("rejects an oversized declared attachment before reading its body", async () => {
+    const cancel = vi.fn();
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(jiraIssueAttachments(jiraAttachment())))
+      .mockResolvedValueOnce(
+        new Response(new ReadableStream({ cancel }), {
+          headers: {
+            "Content-Type": "image/png",
+            "Content-Length": String(5 * 1024 * 1024 + 1),
+          },
+        }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetIssueAttachmentTool().toolCall({
+      params: {
+        name: "get-issue-attachment",
+        arguments: { issueKey: "OMS-1", attachmentId: "12345" },
+      },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.ATTACHMENT_TOO_LARGE,
+            message: "Jira attachment exceeds the supported size limit.",
+          }),
+        },
+      ],
+      isError: true,
+    });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("stops an oversized attachment stream with an invalid Content-Length", async () => {
+    const cancel = vi.fn();
+    let chunk = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        chunk += 1;
+        if (chunk === 1) controller.enqueue(new Uint8Array(5 * 1024 * 1024));
+        else if (chunk === 2) controller.enqueue(Uint8Array.of(0));
+      },
+      cancel,
+    });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(jiraIssueAttachments(jiraAttachment())))
+      .mockResolvedValueOnce(
+        new Response(body, {
+          headers: { "Content-Type": "image/png", "Content-Length": "invalid" },
+        }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetIssueAttachmentTool().toolCall({
+      params: {
+        name: "get-issue-attachment",
+        arguments: { issueKey: "OMS-1", attachmentId: "12345" },
+      },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.ATTACHMENT_TOO_LARGE,
+            message: "Jira attachment exceeds the supported size limit.",
+          }),
+        },
+      ],
+      isError: true,
+    });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("returns ATTACHMENT_NOT_FOUND when the selected attachment disappears", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(jiraIssueAttachments(jiraAttachment())))
+      .mockResolvedValueOnce(new Response("private Jira response", { status: 404 }));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetIssueAttachmentTool().toolCall({
+      params: {
+        name: "get-issue-attachment",
+        arguments: { issueKey: "OMS-1", attachmentId: "12345" },
+      },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.ATTACHMENT_NOT_FOUND,
+            message: "Jira attachment was not found.",
+            httpStatus: 404,
+          }),
+        },
+      ],
+      isError: true,
+    });
+  });
+
+  it("returns NETWORK_TIMEOUT when the attachment body times out", async () => {
+    const timeout = AbortSignal.timeout.bind(AbortSignal);
+    vi.spyOn(AbortSignal, "timeout").mockImplementation(() => timeout(1));
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(jiraIssueAttachments(jiraAttachment())))
+      .mockImplementationOnce(
+        async (_input, init: RequestInit) =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                init.signal?.addEventListener(
+                  "abort",
+                  () => controller.error(new DOMException("private timeout", "TimeoutError")),
+                  { once: true },
+                );
+              },
+            }),
+            { headers: { "Content-Type": "image/png" } },
+          ),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new GetIssueAttachmentTool().toolCall({
+      params: {
+        name: "get-issue-attachment",
+        arguments: { issueKey: "OMS-1", attachmentId: "12345" },
+      },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.NETWORK_TIMEOUT,
+            message: "Jira request timed out.",
           }),
         },
       ],

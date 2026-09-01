@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getJiraUrl } from "../common/get-jira-url.js";
 import { getToken } from "../common/get-token.js";
+import { parseSafeHttpUrl } from "./urls.js";
 
 export const JIRA_ERROR_CODE = {
   BAD_REQUEST: "BAD_REQUEST",
@@ -13,6 +14,8 @@ export const JIRA_ERROR_CODE = {
   RESPONSE_FORMAT_ERROR: "RESPONSE_FORMAT_ERROR",
   CONFIG_ERROR: "CONFIG_ERROR",
   ATTACHMENT_NOT_FOUND: "ATTACHMENT_NOT_FOUND",
+  ATTACHMENT_TOO_LARGE: "ATTACHMENT_TOO_LARGE",
+  UNSUPPORTED_ATTACHMENT_TYPE: "UNSUPPORTED_ATTACHMENT_TYPE",
 } as const;
 
 export type JiraErrorCode = (typeof JIRA_ERROR_CODE)[keyof typeof JIRA_ERROR_CODE];
@@ -30,6 +33,8 @@ const safeMessages: Record<JiraErrorCode, string> = {
   RESPONSE_FORMAT_ERROR: "Jira returned an unexpected response.",
   CONFIG_ERROR: "Jira configuration is invalid.",
   ATTACHMENT_NOT_FOUND: "Jira attachment was not found.",
+  ATTACHMENT_TOO_LARGE: "Jira attachment exceeds the supported size limit.",
+  UNSUPPORTED_ATTACHMENT_TYPE: "Jira attachment type is unsupported.",
 };
 
 export class JiraClientError extends Error {
@@ -124,26 +129,22 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
     timeoutMs: 10_000,
     ...overrides,
   };
-  const buildUrl = (pathname: string, query: GetOptions["query"]): URL => {
+  const getBaseUrl = (): URL => {
     let baseUrl: URL;
 
     try {
-      baseUrl = new URL(dependencies.getJiraUrl());
+      baseUrl = parseSafeHttpUrl(dependencies.getJiraUrl());
     } catch (cause) {
       throw new JiraClientError(JIRA_ERROR_CODE.CONFIG_ERROR, undefined, cause);
     }
 
-    if (
-      !["http:", "https:"].includes(baseUrl.protocol) ||
-      baseUrl.username !== "" ||
-      baseUrl.password !== "" ||
-      baseUrl.search !== "" ||
-      baseUrl.hash !== ""
-    ) {
-      throw new JiraClientError(JIRA_ERROR_CODE.CONFIG_ERROR);
-    }
-
     baseUrl.pathname = `${baseUrl.pathname.replace(/\/+$/, "")}/`;
+
+    return baseUrl;
+  };
+
+  const buildUrl = (pathname: string, query: GetOptions["query"]): URL => {
+    const baseUrl = getBaseUrl();
 
     let pathSegments: string[];
     try {
@@ -238,6 +239,27 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
   };
 
   return {
+    getInternalPathname(uri: string): string {
+      const baseUrl = getBaseUrl();
+      let url: URL;
+
+      try {
+        url = parseSafeHttpUrl(uri);
+      } catch (cause) {
+        throw new JiraClientError(JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR, undefined, cause);
+      }
+
+      if (
+        url.origin !== baseUrl.origin ||
+        !url.pathname.startsWith(baseUrl.pathname) ||
+        url.pathname === baseUrl.pathname
+      ) {
+        throw new JiraClientError(JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR);
+      }
+
+      return url.pathname.slice(baseUrl.pathname.length);
+    },
+
     async probe({ pathname, query }: ProbeOptions) {
       let token: string | undefined;
 
