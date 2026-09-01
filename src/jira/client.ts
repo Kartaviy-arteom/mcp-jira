@@ -16,6 +16,11 @@ export const JIRA_ERROR_CODE = {
   ATTACHMENT_NOT_FOUND: "ATTACHMENT_NOT_FOUND",
   ATTACHMENT_TOO_LARGE: "ATTACHMENT_TOO_LARGE",
   UNSUPPORTED_ATTACHMENT_TYPE: "UNSUPPORTED_ATTACHMENT_TYPE",
+  TRANSITION_NOT_AVAILABLE: "TRANSITION_NOT_AVAILABLE",
+  TRANSITION_AMBIGUOUS: "TRANSITION_AMBIGUOUS",
+  TRANSITION_REQUIRES_FIELDS: "TRANSITION_REQUIRES_FIELDS",
+  TRANSITION_VERIFICATION_FAILED: "TRANSITION_VERIFICATION_FAILED",
+  TRANSITION_STATUS_MISMATCH: "TRANSITION_STATUS_MISMATCH",
 } as const;
 
 export type JiraErrorCode = (typeof JIRA_ERROR_CODE)[keyof typeof JIRA_ERROR_CODE];
@@ -54,6 +59,12 @@ const safeMessages: Record<JiraErrorCode, string> = {
   ATTACHMENT_NOT_FOUND: "Jira attachment was not found.",
   ATTACHMENT_TOO_LARGE: "Jira attachment exceeds the supported size limit.",
   UNSUPPORTED_ATTACHMENT_TYPE: "Jira attachment type is unsupported.",
+  TRANSITION_NOT_AVAILABLE: "No available Jira transition reaches the requested status.",
+  TRANSITION_AMBIGUOUS: "More than one available Jira transition reaches the requested status.",
+  TRANSITION_REQUIRES_FIELDS:
+    "The Jira transition requires fields that this tool does not support.",
+  TRANSITION_VERIFICATION_FAILED: "The Jira status transition result could not be verified.",
+  TRANSITION_STATUS_MISMATCH: "The Jira issue is in an unexpected status after the transition.",
 };
 
 export class JiraClientError extends Error {

@@ -9,6 +9,7 @@ vi.mock("@napi-rs/keyring", () => ({
 }));
 
 import DiagnoseJiraConnectionTool from "../src/tools/diagnoseJiraConnectionTool.js";
+import ChangeIssueStatusTool from "../src/tools/changeIssueStatusTool.js";
 import GetIssueAttachmentTool from "../src/tools/getIssueAttachmentTool.js";
 import GetIssueWorklogsTool from "../src/tools/getIssueWorklogsTool.js";
 import GetReleaseTasksTool from "../src/tools/getReleaseTasksTool.js";
@@ -48,6 +49,569 @@ describe("Jira tools", () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+  });
+
+  it.each([
+    { issueKey: "invalid", targetStatus: "Done" },
+    { issueKey: "OMS-1", targetStatus: "   " },
+    { issueKey: "OMS-1", targetStatus: "Done", transitionId: "31" },
+  ])("rejects invalid change-issue-status input before fetch: %j", async (input) => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: { name: "change-issue-status", arguments: input },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("returns a verified no-op after one normalized status read", async () => {
+    const fetch = vi.fn(async () =>
+      Response.json({
+        key: "OMS-9",
+        fields: { status: { id: "3", name: " In Progress ", private: "Jira field" } },
+        private: "Jira issue",
+      }),
+    );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: " oms-1 ", targetStatus: " in progress " },
+      },
+    });
+
+    expect(response.isError).toBeUndefined();
+    expect(response.structuredContent).toEqual({
+      issueKey: "OMS-9",
+      previousStatus: { id: "3", name: " In Progress " },
+      newStatus: { id: "3", name: " In Progress " },
+      transition: null,
+      changed: false,
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledWith(
+      new URL("https://jira.example.test/jira/rest/api/2/issue/OMS-1?fields=status"),
+      expect.objectContaining({ redirect: "error" }),
+    );
+    expect(JSON.stringify(response)).not.toContain("Jira field");
+    expect(JSON.stringify(response)).not.toContain("Jira issue");
+  });
+
+  it("executes one matching transition and returns the separately verified status", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-9", fields: { status: { id: "1", name: "Open" } } }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          transitions: [
+            {
+              id: "31",
+              name: "Start Progress",
+              to: { id: "3", name: " IN PROGRESS " },
+              fields: {},
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-9", fields: { status: { id: "3", name: "Work Started" } } }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: "OMS-1", targetStatus: "in progress" },
+      },
+    });
+
+    expect(response.structuredContent).toEqual({
+      issueKey: "OMS-9",
+      previousStatus: { id: "1", name: "Open" },
+      newStatus: { id: "3", name: "Work Started" },
+      transition: { id: "31", name: "Start Progress" },
+      changed: true,
+    });
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(fetch).toHaveBeenNthCalledWith(
+      1,
+      new URL("https://jira.example.test/jira/rest/api/2/issue/OMS-1?fields=status"),
+      expect.objectContaining({ redirect: "error" }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      2,
+      new URL(
+        "https://jira.example.test/jira/rest/api/2/issue/OMS-9/transitions?expand=transitions.fields",
+      ),
+      expect.objectContaining({ redirect: "error" }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      3,
+      new URL("https://jira.example.test/jira/rest/api/2/issue/OMS-9/transitions"),
+      expect.objectContaining({
+        method: "POST",
+        body: '{"transition":{"id":"31"}}',
+      }),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      4,
+      new URL("https://jira.example.test/jira/rest/api/2/issue/OMS-9?fields=status"),
+      expect.objectContaining({ redirect: "error" }),
+    );
+  });
+
+  it("returns every available transition in Jira order when the target is unavailable", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-1", fields: { status: { id: "1", name: "Open" } } }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          transitions: [
+            {
+              id: "21",
+              name: "Resolve",
+              to: { id: "5", name: "Done", private: "status" },
+              fields: {},
+              private: "transition",
+            },
+            { id: "22", name: "Close", to: { id: "5", name: "Done" }, fields: {} },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: "OMS-1", targetStatus: " Review " },
+      },
+    });
+
+    expect(response).toEqual({
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify({
+            code: JIRA_ERROR_CODE.TRANSITION_NOT_AVAILABLE,
+            message: "No available Jira transition reaches the requested status.",
+            details: {
+              targetStatus: "Review",
+              availableTransitions: [
+                { id: "21", name: "Resolve", targetStatus: { id: "5", name: "Done" } },
+                { id: "22", name: "Close", targetStatus: { id: "5", name: "Done" } },
+              ],
+            },
+          }),
+        },
+      ],
+      isError: true,
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(response)).not.toContain("private");
+  });
+
+  it("returns all matching transition candidates without choosing one", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-1", fields: { status: { id: "1", name: "Open" } } }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          transitions: [
+            { id: "31", name: "Start", to: { id: "3", name: "In Progress" }, fields: {} },
+            {
+              id: "32",
+              name: "Resume",
+              to: { id: "3", name: " in progress " },
+              fields: {},
+            },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: "OMS-1", targetStatus: "IN PROGRESS" },
+      },
+    });
+
+    expect(JSON.parse(response.content[0]!.text)).toEqual({
+      code: JIRA_ERROR_CODE.TRANSITION_AMBIGUOUS,
+      message: "More than one available Jira transition reaches the requested status.",
+      details: {
+        targetStatus: "IN PROGRESS",
+        candidates: [
+          { id: "31", name: "Start", targetStatus: { id: "3", name: "In Progress" } },
+          { id: "32", name: "Resume", targetStatus: { id: "3", name: " in progress " } },
+        ],
+      },
+    });
+    expect(response.isError).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects every required transition field, including fields with defaults", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-1", fields: { status: { id: "1", name: "Open" } } }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          transitions: [
+            {
+              id: "41",
+              name: "Complete",
+              to: { id: "5", name: "Done" },
+              fields: {
+                optionalComment: {
+                  required: false,
+                  name: "Optional comment",
+                  hasDefaultValue: false,
+                  schema: { type: "string" },
+                },
+                resolution: {
+                  required: true,
+                  name: "Resolution",
+                  hasDefaultValue: true,
+                  schema: { type: "resolution", system: "resolution", private: "schema" },
+                  private: "field",
+                },
+                comment: {
+                  required: true,
+                  name: "Comment",
+                  hasDefaultValue: false,
+                  schema: {
+                    type: "array",
+                    items: "string",
+                    custom: "plugin:comment",
+                    customId: 10001,
+                  },
+                },
+              },
+            },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: "OMS-1", targetStatus: "Done" },
+      },
+    });
+
+    expect(JSON.parse(response.content[0]!.text)).toEqual({
+      code: JIRA_ERROR_CODE.TRANSITION_REQUIRES_FIELDS,
+      message: "The Jira transition requires fields that this tool does not support.",
+      details: {
+        transition: {
+          id: "41",
+          name: "Complete",
+          targetStatus: { id: "5", name: "Done" },
+        },
+        requiredFields: [
+          {
+            id: "resolution",
+            name: "Resolution",
+            hasDefaultValue: true,
+            schema: { type: "resolution", system: "resolution" },
+          },
+          {
+            id: "comment",
+            name: "Comment",
+            hasDefaultValue: false,
+            schema: {
+              type: "array",
+              items: "string",
+              custom: "plugin:comment",
+              customId: 10001,
+            },
+          },
+        ],
+      },
+    });
+    expect(response.isError).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(response)).not.toContain("private");
+  });
+
+  it("rejects a transition with one required field", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-1", fields: { status: { id: "1", name: "Open" } } }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          transitions: [
+            {
+              id: "41",
+              name: "Complete",
+              to: { id: "5", name: "Done" },
+              fields: {
+                resolution: {
+                  required: true,
+                  name: "Resolution",
+                  hasDefaultValue: false,
+                  schema: { type: "resolution", system: "resolution" },
+                },
+              },
+            },
+          ],
+        }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: "OMS-1", targetStatus: "Done" },
+      },
+    });
+
+    expect(JSON.parse(response.content[0]!.text)).toMatchObject({
+      code: JIRA_ERROR_CODE.TRANSITION_REQUIRES_FIELDS,
+      details: { requiredFields: [{ id: "resolution", name: "Resolution" }] },
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns a POST error without verification or retry", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-1", fields: { status: { id: "1", name: "Open" } } }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          transitions: [
+            { id: "31", name: "Start", to: { id: "3", name: "In Progress" }, fields: {} },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(new Response("private POST body", { status: 403 }));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: "OMS-1", targetStatus: "In Progress" },
+      },
+    });
+
+    expect(JSON.parse(response.content[0]!.text)).toEqual({
+      code: JIRA_ERROR_CODE.ACCESS_DENIED,
+      message: "Jira access was denied.",
+    });
+    expect(response.isError).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(JSON.stringify(response)).not.toContain("private POST body");
+  });
+
+  it("normalizes a failed verification read without retrying", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-9", fields: { status: { id: "1", name: "Open" } } }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          transitions: [
+            { id: "31", name: "Start", to: { id: "3", name: "In Progress" }, fields: {} },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(new Response("private verification body", { status: 500 }));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: "OMS-1", targetStatus: "In Progress" },
+      },
+    });
+
+    expect(JSON.parse(response.content[0]!.text)).toEqual({
+      code: JIRA_ERROR_CODE.TRANSITION_VERIFICATION_FAILED,
+      message: "The Jira status transition result could not be verified.",
+      details: {
+        issueKey: "OMS-9",
+        previousStatus: { id: "1", name: "Open" },
+        expectedStatus: { id: "3", name: "In Progress" },
+        transition: { id: "31", name: "Start" },
+        causeCode: JIRA_ERROR_CODE.JIRA_UNAVAILABLE,
+      },
+    });
+    expect(response.isError).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(JSON.stringify(response)).not.toContain("private verification body");
+  });
+
+  it.each([
+    [{ id: "1", name: "Open" }, "the initial status"],
+    [{ id: "7", name: "QA Review" }, "a third concurrent status"],
+  ])("reports a verified mismatch with %s", async (actualStatus) => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-9", fields: { status: { id: "1", name: "Open" } } }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          transitions: [
+            { id: "31", name: "Start", to: { id: "3", name: "In Progress" }, fields: {} },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-9", fields: { status: actualStatus, private: "field" } }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: "OMS-1", targetStatus: "In Progress" },
+      },
+    });
+
+    expect(JSON.parse(response.content[0]!.text)).toEqual({
+      code: JIRA_ERROR_CODE.TRANSITION_STATUS_MISMATCH,
+      message: "The Jira issue is in an unexpected status after the transition.",
+      details: {
+        issueKey: "OMS-9",
+        previousStatus: { id: "1", name: "Open" },
+        expectedStatus: { id: "3", name: "In Progress" },
+        actualStatus,
+        transition: { id: "31", name: "Start" },
+      },
+    });
+    expect(response.isError).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(JSON.stringify(response)).not.toContain("private");
+  });
+
+  it("publishes the mutation contract in the tool definition", () => {
+    const definition = new ChangeIssueStatusTool().toolDefinition;
+
+    expect(definition).toMatchObject({
+      name: "change-issue-status",
+      description: "Changes a Jira issue's status by executing one available workflow transition.",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+      inputSchema: {
+        type: "object",
+        properties: {
+          issueKey: { type: "string", description: expect.any(String) },
+          targetStatus: { type: "string", description: expect.any(String) },
+        },
+        required: ["issueKey", "targetStatus"],
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          issueKey: { type: "string" },
+          previousStatus: { type: "object" },
+          newStatus: { type: "object" },
+          transition: { type: ["object", "null"] },
+          changed: { type: "boolean" },
+        },
+        required: ["issueKey", "previousStatus", "newStatus", "transition", "changed"],
+      },
+    });
+  });
+
+  it.each([
+    [[Response.json({ key: "OMS-1", fields: { status: { id: 1, private: "issue" } } })], 1],
+    [
+      [
+        Response.json({ key: "OMS-1", fields: { status: { id: "1", name: "Open" } } }),
+        Response.json({
+          transitions: [
+            {
+              id: "31",
+              name: "Start",
+              to: { id: "3", private: "transition" },
+              fields: {},
+            },
+          ],
+        }),
+      ],
+      2,
+    ],
+  ])("hides a malformed Jira read before mutation", async (responses, requestCount) => {
+    const fetch = vi.fn();
+    for (const response of responses) fetch.mockResolvedValueOnce(response);
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: "OMS-1", targetStatus: "In Progress" },
+      },
+    });
+
+    expect(JSON.parse(response.content[0]!.text)).toEqual({
+      code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR,
+      message: "Jira returned an unexpected response.",
+    });
+    expect(response.isError).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(requestCount);
+    expect(JSON.stringify(response)).not.toContain("private");
+  });
+
+  it("wraps a malformed verification response as a failed verification", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-9", fields: { status: { id: "1", name: "Open" } } }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          transitions: [
+            { id: "31", name: "Start", to: { id: "3", name: "In Progress" }, fields: {} },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        Response.json({ key: "OMS-9", fields: { status: { name: "private status" } } }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new ChangeIssueStatusTool().toolCall({
+      params: {
+        name: "change-issue-status",
+        arguments: { issueKey: "OMS-1", targetStatus: "In Progress" },
+      },
+    });
+
+    expect(JSON.parse(response.content[0]!.text)).toMatchObject({
+      code: JIRA_ERROR_CODE.TRANSITION_VERIFICATION_FAILED,
+      details: { causeCode: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR },
+    });
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(JSON.stringify(response)).not.toContain("private status");
   });
 
   it("returns an empty anonymous worklog summary", async () => {
