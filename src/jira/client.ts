@@ -8,6 +8,11 @@ export const JIRA_ERROR_CODE = {
   AUTH_ERROR: "AUTH_ERROR",
   ACCESS_DENIED: "ACCESS_DENIED",
   ISSUE_NOT_FOUND: "ISSUE_NOT_FOUND",
+  PROJECT_NOT_FOUND: "PROJECT_NOT_FOUND",
+  ISSUE_TYPE_NOT_AVAILABLE: "ISSUE_TYPE_NOT_AVAILABLE",
+  EPIC_NOT_AVAILABLE: "EPIC_NOT_AVAILABLE",
+  EPIC_LINK_NOT_AVAILABLE: "EPIC_LINK_NOT_AVAILABLE",
+  RELEASE_NOT_AVAILABLE: "RELEASE_NOT_AVAILABLE",
   RATE_LIMITED: "RATE_LIMITED",
   JIRA_UNAVAILABLE: "JIRA_UNAVAILABLE",
   NETWORK_TIMEOUT: "NETWORK_TIMEOUT",
@@ -25,7 +30,10 @@ export const JIRA_ERROR_CODE = {
 
 export type JiraErrorCode = (typeof JIRA_ERROR_CODE)[keyof typeof JIRA_ERROR_CODE];
 
-type JiraNotFoundCode = (typeof JIRA_ERROR_CODE)["ISSUE_NOT_FOUND" | "ATTACHMENT_NOT_FOUND"];
+type JiraNotFoundCode = (typeof JIRA_ERROR_CODE)[
+  | "ISSUE_NOT_FOUND"
+  | "ATTACHMENT_NOT_FOUND"
+  | "PROJECT_NOT_FOUND"];
 
 export type JsonValue =
   | string
@@ -51,6 +59,11 @@ const safeMessages: Record<JiraErrorCode, string> = {
   AUTH_ERROR: "Jira authentication failed.",
   ACCESS_DENIED: "Jira access was denied.",
   ISSUE_NOT_FOUND: "Jira issue was not found.",
+  PROJECT_NOT_FOUND: "Jira project was not found.",
+  ISSUE_TYPE_NOT_AVAILABLE: "The Jira issue type is not available in the project.",
+  EPIC_NOT_AVAILABLE: "The Jira epic is not available in the project.",
+  EPIC_LINK_NOT_AVAILABLE: "The Epic Link field is not available for this issue type.",
+  RELEASE_NOT_AVAILABLE: "No unique future Jira release has the requested name.",
   RATE_LIMITED: "Jira rate limit was exceeded.",
   JIRA_UNAVAILABLE: "Jira is unavailable.",
   NETWORK_TIMEOUT: "Jira request timed out.",
@@ -103,6 +116,10 @@ type GetJsonOptions<T> = RequestOptions & {
 
 type PostJsonNoContentOptions = RequestOptions & {
   body: JsonValue;
+};
+
+type PostJsonOptions<T> = PostJsonNoContentOptions & {
+  schema: z.ZodType<T>;
 };
 
 type ProbeOptions = Pick<RequestOptions, "pathname" | "query">;
@@ -282,6 +299,40 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
     return result;
   };
 
+  const readJson = async <T>(response: Response, signal: AbortSignal, schema: z.ZodType<T>) => {
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch (cause) {
+      const isResponseFormatError = cause instanceof SyntaxError;
+      throw new JiraClientError(
+        signal.aborted
+          ? JIRA_ERROR_CODE.NETWORK_TIMEOUT
+          : isResponseFormatError
+            ? JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR
+            : JIRA_ERROR_CODE.JIRA_UNAVAILABLE,
+        !signal.aborted && isResponseFormatError ? response.status : undefined,
+        cause,
+      );
+    }
+
+    try {
+      return schema.parse(body);
+    } catch (cause) {
+      throw new JiraClientError(JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR, response.status, cause);
+    }
+  };
+
+  const serializeJson = (body: JsonValue): string => {
+    try {
+      const serializedBody = JSON.stringify(body);
+      if (serializedBody !== undefined) return serializedBody;
+    } catch (cause) {
+      throw new JiraClientError(JIRA_ERROR_CODE.BAD_REQUEST, undefined, cause);
+    }
+    throw new JiraClientError(JIRA_ERROR_CODE.BAD_REQUEST);
+  };
+
   return {
     getInternalPathname(uri: string): string {
       const baseUrl = getBaseUrl();
@@ -335,27 +386,25 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
         "application/json",
       );
 
-      let body: unknown;
-      try {
-        body = await response.json();
-      } catch (cause) {
-        const isResponseFormatError = cause instanceof SyntaxError;
-        throw new JiraClientError(
-          signal.aborted
-            ? JIRA_ERROR_CODE.NETWORK_TIMEOUT
-            : isResponseFormatError
-              ? JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR
-              : JIRA_ERROR_CODE.JIRA_UNAVAILABLE,
-          !signal.aborted && isResponseFormatError ? response.status : undefined,
-          cause,
-        );
-      }
+      return readJson(response, signal, schema);
+    },
 
-      try {
-        return schema.parse(body);
-      } catch (cause) {
-        throw new JiraClientError(JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR, response.status, cause);
+    async postJson<T>({
+      pathname,
+      query,
+      body,
+      schema,
+      notFoundCode,
+    }: PostJsonOptions<T>): Promise<T> {
+      const { response, signal } = await request(
+        { pathname, query, notFoundCode },
+        "application/json",
+        { method: "POST", body: serializeJson(body), contentType: "application/json" },
+      );
+      if (response.status !== 201) {
+        throw new JiraClientError(JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR, response.status);
       }
+      return readJson(response, signal, schema);
     },
 
     async postJsonNoContent({
@@ -364,20 +413,9 @@ export const createJiraClient = (overrides: Partial<JiraClientDependencies> = {}
       body,
       notFoundCode,
     }: PostJsonNoContentOptions): Promise<void> {
-      let serializedBody: string | undefined;
-      try {
-        serializedBody = JSON.stringify(body);
-      } catch (cause) {
-        throw new JiraClientError(JIRA_ERROR_CODE.BAD_REQUEST, undefined, cause);
-      }
-
-      if (serializedBody === undefined) {
-        throw new JiraClientError(JIRA_ERROR_CODE.BAD_REQUEST);
-      }
-
       const { response } = await request({ pathname, query, notFoundCode }, "application/json", {
         method: "POST",
-        body: serializedBody,
+        body: serializeJson(body),
         contentType: "application/json",
       });
 

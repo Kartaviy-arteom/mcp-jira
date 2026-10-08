@@ -127,6 +127,58 @@ describe("Jira HTTP client", () => {
     );
   });
 
+  it("accepts only a validated 201 JSON response for creation", async () => {
+    const fetch = vi.fn(async () =>
+      Response.json({ key: "OMSAGORA-123", private: "Jira detail" }, { status: 201 }),
+    );
+    const client = createJiraClient({
+      fetch,
+      getJiraUrl: () => "https://jira.example.test/jira",
+      getToken: () => "secret-token",
+      timeoutMs: 1_000,
+    });
+
+    await expect(
+      client.postJson({
+        pathname: "rest/api/2/issue",
+        body: { fields: { summary: "Topic" } },
+        schema: z.object({ key: z.string() }),
+      }),
+    ).resolves.toEqual({ key: "OMSAGORA-123" });
+    expect(fetch).toHaveBeenCalledWith(
+      new URL("https://jira.example.test/jira/rest/api/2/issue"),
+      expect.objectContaining({
+        method: "POST",
+        body: '{"fields":{"summary":"Topic"}}',
+        headers: {
+          Accept: "application/json",
+          Authorization: "Bearer secret-token",
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+  });
+
+  it.each([
+    { status: 200, body: { key: "OMSAGORA-1" } },
+    { status: 201, body: { key: 1 } },
+  ])("rejects an invalid creation response: %j", async ({ status, body }) => {
+    const client = createJiraClient({
+      fetch: async () => Response.json(body, { status }),
+      getJiraUrl: () => "https://jira.example.test",
+      getToken: () => "secret-token",
+      timeoutMs: 1_000,
+    });
+
+    await expect(
+      client.postJson({
+        pathname: "rest/api/2/issue",
+        body: {},
+        schema: z.object({ key: z.string() }),
+      }),
+    ).rejects.toMatchObject({ code: JIRA_ERROR_CODE.RESPONSE_FORMAT_ERROR, httpStatus: status });
+  });
+
   it.each([200, 201, 202])("rejects incompatible successful POST status %i", async (status) => {
     const client = createJiraClient({
       fetch: async () => Response.json({ private: "Jira body" }, { status }),

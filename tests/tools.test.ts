@@ -10,6 +10,7 @@ vi.mock("@napi-rs/keyring", () => ({
 
 import DiagnoseJiraConnectionTool from "../src/tools/diagnoseJiraConnectionTool.js";
 import ChangeIssueStatusTool from "../src/tools/changeIssueStatusTool.js";
+import CreateIssueTool from "../src/tools/createIssueTool.js";
 import GetIssueAttachmentTool from "../src/tools/getIssueAttachmentTool.js";
 import GetIssueWorklogsTool from "../src/tools/getIssueWorklogsTool.js";
 import GetReleaseTasksTool from "../src/tools/getReleaseTasksTool.js";
@@ -38,6 +39,29 @@ const jiraIssueAttachments = (...attachment: JiraAttachmentFixture[]) => ({
   fields: { attachment },
 });
 
+const jiraEpic = (key = "OMSAGORA-350", type = "Epic", project = "OMSAGORA") => ({
+  key,
+  fields: { issuetype: { name: type }, project: { key: project } },
+});
+
+const jiraIssueTypes = () => ({
+  isLast: true,
+  startAt: 0,
+  values: [{ id: "11", name: "Front", subtask: false }],
+});
+
+const jiraCreateFields = () => ({
+  isLast: true,
+  startAt: 0,
+  values: [
+    { fieldId: "summary" },
+    {
+      fieldId: "customfield_10101",
+      schema: { custom: "com.pyxis.greenhopper.jira:gh-epic-link" },
+    },
+  ],
+});
+
 describe("Jira tools", () => {
   beforeEach(() => {
     findCredentials.mockReset();
@@ -49,6 +73,323 @@ describe("Jira tools", () => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+  });
+
+  it.each([
+    { summary: " ", description: "Description" },
+    { summary: " [FE] ", description: "Description" },
+    { summary: "Summary", description: "\t\n" },
+    { summary: "Summary", description: "Description", project: "OTHER" },
+    { summary: "Summary", description: "Description", epicKey: "OTHER-1" },
+    { summary: "Summary", description: "Description", releaseName: "  " },
+  ])("rejects invalid create-jira-issue input before fetch: %j", async (input) => {
+    const fetch = vi.fn();
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new CreateIssueTool().toolCall({
+      params: { name: "create-jira-issue", arguments: input },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([" Topic ", "[FE] Topic", "[fe] [FE] Topic"])(
+    "creates FRONT in OMSAGORA with one FE prefix from %s",
+    async (summary) => {
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(Response.json({ key: "OMSAGORA", id: "10000" }))
+        .mockResolvedValueOnce(
+          Response.json({
+            isLast: true,
+            startAt: 0,
+            values: [
+              { id: "10", name: "BACK", subtask: false },
+              { id: "11", name: "Front", subtask: false },
+            ],
+          }),
+        )
+        .mockResolvedValueOnce(Response.json(jiraEpic()))
+        .mockResolvedValueOnce(Response.json(jiraCreateFields()))
+        .mockResolvedValueOnce(
+          Response.json({ id: "123", key: "OMSAGORA-123", self: "private" }, { status: 201 }),
+        );
+      vi.stubGlobal("fetch", fetch);
+
+      const response = await new CreateIssueTool().toolCall({
+        params: {
+          name: "create-jira-issue",
+          arguments: { summary, description: " Details " },
+        },
+      });
+
+      expect(response.structuredContent).toEqual({ issueKey: "OMSAGORA-123" });
+      expect(JSON.stringify(response)).not.toContain("private");
+      expect(fetch).toHaveBeenCalledTimes(5);
+      expect(fetch).toHaveBeenNthCalledWith(
+        1,
+        new URL("https://jira.example.test/jira/rest/api/2/project/OMSAGORA"),
+        expect.objectContaining({ redirect: "error" }),
+      );
+      expect(fetch).toHaveBeenNthCalledWith(
+        2,
+        new URL(
+          "https://jira.example.test/jira/rest/api/2/issue/createmeta/OMSAGORA/issuetypes?startAt=0",
+        ),
+        expect.objectContaining({ redirect: "error" }),
+      );
+      expect(fetch).toHaveBeenNthCalledWith(
+        5,
+        new URL("https://jira.example.test/jira/rest/api/2/issue"),
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            fields: {
+              project: { key: "OMSAGORA" },
+              issuetype: { id: "11" },
+              summary: "[FE] Topic",
+              description: " Details ",
+              customfield_10101: "OMSAGORA-350",
+            },
+          }),
+        }),
+      );
+    },
+  );
+
+  it("finds FRONT on a later metadata page", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ key: "OMSAGORA" }))
+      .mockResolvedValueOnce(
+        Response.json({
+          isLast: false,
+          startAt: 0,
+          values: [{ id: "10", name: "BACK", subtask: false }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          isLast: true,
+          startAt: 1,
+          values: [{ id: "11", name: "Front", subtask: false }],
+        }),
+      )
+      .mockResolvedValueOnce(Response.json(jiraEpic()))
+      .mockResolvedValueOnce(Response.json(jiraCreateFields()))
+      .mockResolvedValueOnce(Response.json({ key: "OMSAGORA-1" }, { status: 201 }));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new CreateIssueTool().toolCall({
+      params: {
+        name: "create-jira-issue",
+        arguments: { summary: "Topic", description: "Details" },
+      },
+    });
+
+    expect(response.structuredContent).toEqual({ issueKey: "OMSAGORA-1" });
+    expect(fetch).toHaveBeenNthCalledWith(
+      3,
+      new URL(
+        "https://jira.example.test/jira/rest/api/2/issue/createmeta/OMSAGORA/issuetypes?startAt=1",
+      ),
+      expect.anything(),
+    );
+  });
+
+  it("uses a supplied epic and an existing future release", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ key: "OMSAGORA" }))
+      .mockResolvedValueOnce(Response.json(jiraIssueTypes()))
+      .mockResolvedValueOnce(Response.json(jiraEpic("OMSAGORA-777")))
+      .mockResolvedValueOnce(Response.json(jiraCreateFields()))
+      .mockResolvedValueOnce(
+        Response.json([
+          { id: "1", name: "release_21_26", archived: true, released: false },
+          { id: "2", name: "release_21_26", archived: false, released: false },
+        ]),
+      )
+      .mockResolvedValueOnce(Response.json({ key: "OMSAGORA-2" }, { status: 201 }));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new CreateIssueTool().toolCall({
+      params: {
+        name: "create-jira-issue",
+        arguments: {
+          summary: "Topic",
+          description: "Details",
+          epicKey: " omsagora-777 ",
+          releaseName: " release_21_26 ",
+        },
+      },
+    });
+
+    expect(response.structuredContent).toEqual({ issueKey: "OMSAGORA-2" });
+    expect(fetch).toHaveBeenNthCalledWith(
+      3,
+      new URL(
+        "https://jira.example.test/jira/rest/api/2/issue/OMSAGORA-777?fields=issuetype%2Cproject",
+      ),
+      expect.anything(),
+    );
+    expect(fetch).toHaveBeenNthCalledWith(
+      6,
+      new URL("https://jira.example.test/jira/rest/api/2/issue"),
+      expect.objectContaining({
+        body: JSON.stringify({
+          fields: {
+            project: { key: "OMSAGORA" },
+            issuetype: { id: "11" },
+            summary: "[FE] Topic",
+            description: "Details",
+            customfield_10101: "OMSAGORA-777",
+            fixVersions: [{ id: "2" }],
+          },
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    { epic: jiraEpic("OMSAGORA-350", "Task"), code: JIRA_ERROR_CODE.EPIC_NOT_AVAILABLE },
+    { epic: jiraEpic("OMSAGORA-350", "Epic", "OTHER"), code: JIRA_ERROR_CODE.EPIC_NOT_AVAILABLE },
+  ])("does not create when the issue is not an OMSAGORA epic: %j", async ({ epic, code }) => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ key: "OMSAGORA" }))
+      .mockResolvedValueOnce(Response.json(jiraIssueTypes()))
+      .mockResolvedValueOnce(Response.json(epic));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new CreateIssueTool().toolCall({
+      params: {
+        name: "create-jira-issue",
+        arguments: { summary: "Topic", description: "Details" },
+      },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(JSON.stringify(response)).toContain(code);
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not create when Epic Link is unavailable on the create screen", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ key: "OMSAGORA" }))
+      .mockResolvedValueOnce(Response.json(jiraIssueTypes()))
+      .mockResolvedValueOnce(Response.json(jiraEpic()))
+      .mockResolvedValueOnce(
+        Response.json({ isLast: true, startAt: 0, values: [{ fieldId: "summary" }] }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new CreateIssueTool().toolCall({
+      params: {
+        name: "create-jira-issue",
+        arguments: { summary: "Topic", description: "Details" },
+      },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(JSON.stringify(response)).toContain(JIRA_ERROR_CODE.EPIC_LINK_NOT_AVAILABLE);
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([
+    { id: "1", name: "release_21_26", archived: true, released: false },
+    { id: "1", name: "release_21_26", archived: false, released: true },
+    { id: "1", name: "another", archived: false, released: false },
+  ])("does not create with an unavailable future release: %j", async (version) => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ key: "OMSAGORA" }))
+      .mockResolvedValueOnce(Response.json(jiraIssueTypes()))
+      .mockResolvedValueOnce(Response.json(jiraEpic()))
+      .mockResolvedValueOnce(Response.json(jiraCreateFields()))
+      .mockResolvedValueOnce(Response.json([version]));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new CreateIssueTool().toolCall({
+      params: {
+        name: "create-jira-issue",
+        arguments: { summary: "Topic", description: "Details", releaseName: "release_21_26" },
+      },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(JSON.stringify(response)).toContain(JIRA_ERROR_CODE.RELEASE_NOT_AVAILABLE);
+    expect(fetch).toHaveBeenCalledTimes(5);
+  });
+
+  it("does not create when two future releases share the requested name", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ key: "OMSAGORA" }))
+      .mockResolvedValueOnce(Response.json(jiraIssueTypes()))
+      .mockResolvedValueOnce(Response.json(jiraEpic()))
+      .mockResolvedValueOnce(Response.json(jiraCreateFields()))
+      .mockResolvedValueOnce(
+        Response.json([
+          { id: "1", name: "release_21_26", archived: false, released: false },
+          { id: "2", name: "release_21_26", archived: false, released: false },
+        ]),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new CreateIssueTool().toolCall({
+      params: {
+        name: "create-jira-issue",
+        arguments: { summary: "Topic", description: "Details", releaseName: "release_21_26" },
+      },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(JSON.stringify(response)).toContain(JIRA_ERROR_CODE.RELEASE_NOT_AVAILABLE);
+    expect(fetch).toHaveBeenCalledTimes(5);
+  });
+
+  it("does not create when FRONT is unavailable", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ key: "OMSAGORA" }))
+      .mockResolvedValueOnce(
+        Response.json({
+          isLast: true,
+          startAt: 0,
+          values: [{ id: "11", name: "Front", subtask: true }],
+        }),
+      );
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new CreateIssueTool().toolCall({
+      params: {
+        name: "create-jira-issue",
+        arguments: { summary: "Topic", description: "Details" },
+      },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(JSON.stringify(response)).toContain(JIRA_ERROR_CODE.ISSUE_TYPE_NOT_AVAILABLE);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not create when OMSAGORA is missing", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", fetch);
+
+    const response = await new CreateIssueTool().toolCall({
+      params: {
+        name: "create-jira-issue",
+        arguments: { summary: "Topic", description: "Details" },
+      },
+    });
+
+    expect(response.isError).toBe(true);
+    expect(JSON.stringify(response)).toContain(JIRA_ERROR_CODE.PROJECT_NOT_FOUND);
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it.each([
